@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ReasonableComp Studio</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brandmark">RC</div>
+    <div class="brandcopy"><h1>ReasonableComp Studio</h1><span>Professional tax workpapers</span></div>
+    <span class="vintage" id="vintage">loading wage data…</span>
+    <span class="spacer"></span>
+    <span class="local-pill">LOCAL-ONLY CLIENT DATA</span>
+    <button class="small" onclick="location.hash='#/'">Client library</button>
+  </header>
+  <main id="app"></main>
+  <div class="toast" id="toast"></div>
+  <noscript>This application requires JavaScript. Client data remains in your browser and is not transmitted.</noscript>
+
+  <!-- script order matters: data → config → pure engines → renderers → app -->
+  <script src="js/data/oews-data.js"></script>
+  <script src="js/data/config.js"></script>
+  <script src="js/engine/comp-engine.js"></script>
+  <script src="js/engine/integrity.js"></script>
+  <script src="js/engine/audit-readiness.js"></script>
+  <script src="js/renderers/memo.js"></script>
+  <script src="js/ui/app.js"></script>
+</body>
+</html>
