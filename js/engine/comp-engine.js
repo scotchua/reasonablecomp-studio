@@ -178,6 +178,32 @@
     return PCTS[Math.max(0, Math.min(PCTS.length - 1, i))];
   }
 
+  // ------------------------------------------------------------- payroll cost
+
+  // Exact employer-side payroll cost for a salary in a given tax year (Phase 2 —
+  // replaces the old flat-7.65% simplification). `taxYear` is a number or null;
+  // null (or any non-finite value) falls back to the latest wage-base year on
+  // file WITHOUT a "not on file" note — that note is reserved for a genuinely
+  // out-of-range year, not simply an absent one.
+  function employerPayrollCost(salary, taxYear, cfg) {
+    var bases = cfg.payrollTax.socialSecurityWageBase;
+    var years = Object.keys(bases).map(Number).sort(function (a, b) { return a - b; });
+    var hasYear = taxYear !== null && taxYear !== undefined && isFinite(taxYear);
+    var y = hasYear ? Math.min(Math.max(taxYear, years[0]), years[years.length - 1]) : years[years.length - 1];
+    var clampedYear = hasYear && y !== taxYear;
+    var base = bases[y];
+    var oasdi = cfg.payrollTax.oasdiRate * Math.min(salary, base);
+    var medicare = cfg.payrollTax.medicareRate * salary;
+    var futa = cfg.payrollTax.futaNetRate * Math.min(salary, cfg.payrollTax.futaWageBase);
+    return {
+      total: oasdi + medicare + futa,
+      oasdi: oasdi, medicare: medicare, futa: futa,
+      wageBaseYear: y, wageBase: base,
+      requestedYear: hasYear ? taxYear : null,
+      clampedYear: clampedYear,
+    };
+  }
+
   // ------------------------------------------------------------- cost approach
 
   // components: [{ roleTitle, soc, pctTime (0-100), percentileOverride?, overrideReason?,
@@ -312,10 +338,17 @@
     var nibc = num(f.netIncomeBeforeOfficerComp);
     var res = { applicable: nibc !== null, proposedSalary: proposedSalary };
     if (!res.applicable) { res.reason = 'Net income before officer compensation not provided.'; return res; }
-    var payrollTax = proposedSalary * cfg.employerPayrollTaxRate;
-    res.employerPayrollTax = payrollTax;
-    res.payrollTaxNote = 'Employer payroll cost estimated at ' + (cfg.employerPayrollTaxRate * 100).toFixed(2) + '% flat (no wage-base ceiling, no FUTA/SUTA) — conservative simplification.';
-    res.residual = nibc - proposedSalary - payrollTax;
+    var taxYear = num((input.shareholder || {}).taxYear);
+    var payroll = employerPayrollCost(proposedSalary, taxYear, cfg);
+    var pt = cfg.payrollTax;
+    res.employerPayrollTax = payroll.total;
+    res.payrollTaxDetail = payroll;
+    res.payrollTaxNote = 'Employer payroll cost computed as ' + (pt.oasdiRate * 100).toFixed(1) + '% OASDI up to the $' +
+      payroll.wageBase.toLocaleString() + ' ' + payroll.wageBaseYear + ' Social Security wage base, ' + (pt.medicareRate * 100).toFixed(2) +
+      '% Medicare (uncapped), and ' + (pt.futaNetRate * 100).toFixed(1) + '% net FUTA on the first $' + pt.futaWageBase.toLocaleString() +
+      '. State unemployment tax and workers’ compensation premiums are excluded (understates employer cost slightly).' +
+      (payroll.clampedYear ? ' Wage base for ' + payroll.requestedYear + ' not on file; the ' + payroll.wageBaseYear + ' base was used.' : '');
+    res.residual = nibc - proposedSalary - payroll.total;
     res.residualShare = nibc > 0 ? res.residual / nibc : null;
     if (res.residual < 0) {
       res.verdict = 'negative';
@@ -339,6 +372,7 @@
     var salary = num(f.totalOfficerWages);
     var dist = num(f.totalDistributions);
     var nibc = num(f.netIncomeBeforeOfficerComp);
+    var payrollTaxYear = num((input.shareholder || {}).taxYear);
     var fc = cfg.flags;
 
     // 1. Distributions-to-salary ratio (current year, then trailing 3-year aggregate)
@@ -377,11 +411,9 @@
       }
     }
 
-    // 2. Recommended salary exceeds earnings capacity (including employer payroll cost).
-    // NOTE: this uses the flat employerPayrollTaxRate simplification for now — Phase 2
-    // replaces it with the exact OASDI/Medicare/FUTA computation (employerPayrollCost()).
+    // 2. Recommended salary exceeds earnings capacity (including exact employer payroll cost).
     if (nibc !== null && range) {
-      var capacityPayrollCost = range.mid * cfg.employerPayrollTaxRate;
+      var capacityPayrollCost = employerPayrollCost(range.mid, payrollTaxYear, cfg).total;
       if (range.mid + capacityPayrollCost > nibc) {
         flags.push({ id: 'EXCEEDS_CAPACITY', severity: 'high',
           title: 'Recommended salary exceeds pre-compensation earnings',
@@ -397,13 +429,13 @@
     // all owners at once. `otherShareholders` is populated by buildEngineInput
     // from sibling shareholders' stored analyses for the same tax year.
     if (input.otherShareholders && input.otherShareholders.length && nibc !== null && range) {
-      var ownPayrollCost = range.mid * cfg.employerPayrollTaxRate;
+      var ownPayrollCost = employerPayrollCost(range.mid, payrollTaxYear, cfg).total;
       var othersMidSum = 0, othersPayrollSum = 0;
       var otherNames = [];
       input.otherShareholders.forEach(function (o) {
         var m = Number(o.recommendedMid) || 0;
         othersMidSum += m;
-        othersPayrollSum += m * cfg.employerPayrollTaxRate;
+        othersPayrollSum += employerPayrollCost(m, payrollTaxYear, cfg).total;
         otherNames.push(o.name + ' ($' + Math.round(m).toLocaleString() + ')');
       });
       var combinedTotal = range.mid + ownPayrollCost + othersMidSum + othersPayrollSum;
@@ -602,6 +634,7 @@
   return {
     analyze: analyze,
     num: num,
+    employerPayrollCost: employerPayrollCost,
     lookupWage: lookupWage,
     annualAtPercentile: annualAtPercentile,
     defaultPercentile: defaultPercentile,

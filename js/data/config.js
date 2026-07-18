@@ -44,11 +44,26 @@
     maxHoursScale: 60,
 
     // ---- Income approach (independent investor test) ----
-    // Employer payroll cost on the proposed salary. SIMPLIFICATION: flat 7.65%
-    // (employer OASDI + Medicare) with no Social Security wage-base ceiling and no
-    // FUTA/SUTA — slightly overstates employer cost at high salaries, which is the
-    // conservative direction for this test. Stated in the memo where used.
-    employerPayrollTaxRate: 0.0765,
+    // Exact employer payroll cost on the proposed salary: 6.2% OASDI up to the
+    // Social Security wage base for the tax year, 1.45% Medicare (uncapped — the
+    // employer side has no Additional Medicare Tax), and 0.6% net FUTA (6.0%
+    // gross less the standard 5.4% full state credit) on the first $7,000.
+    // State unemployment tax and workers' compensation premiums are excluded and
+    // disclosed in the memo (they vary by state/rating and would need per-client
+    // input) — this understates employer cost slightly.
+    payrollTax: {
+      oasdiRate: 0.062,
+      medicareRate: 0.0145,
+      futaNetRate: 0.006,
+      futaWageBase: 7000,
+      // SSA OASDI wage bases by year (2026 announced by SSA in October 2025).
+      // A tax year outside this table clamps to the nearest year on file.
+      socialSecurityWageBase: {
+        2015: 118500, 2016: 118500, 2017: 127200, 2018: 128400, 2019: 132900,
+        2020: 137700, 2021: 142800, 2022: 147000, 2023: 160200, 2024: 168600,
+        2025: 176100, 2026: 184500,
+      },
+    },
     // Residual return below this share of net income before officer comp raises
     // the "thin residual" plausibility flag (not a veto of the market/cost figures).
     thinResidualShare: 0.10,

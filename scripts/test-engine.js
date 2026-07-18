@@ -86,16 +86,16 @@ const client = { name: 'Test Co', areaCode: '0017660' };
 // Market approach: 132011 at 60% >= 60% threshold -> full-role 62,400/83,200/104,000
 // Income approach now tests the shareholder's actual planned wages (totalOfficerWages
 // = 60,000), not the tool's own 85,620 recommendation (that would be circular).
-//   NIBC 150,000; tested 60,000; payroll (flat 7.65% simplification, Phase 2 not yet
-//   landed) = 60,000 x .0765 = 4,590; residual = 150,000-60,000-4,590 = 85,410
-//   (share .5694 -> plausible)
+//   NIBC 150,000; tested 60,000; tax year 2025 -> SSA wage base 176,100 (60,000 is
+//   under it): OASDI 60,000x.062=3,720; Medicare 60,000x.0145=870; FUTA 7,000x.006=42;
+//   payroll = 4,632.00; residual = 150,000-60,000-4,632 = 85,368.00 (share .5691 -> plausible)
 // BELOW_RANGE: planned wages 60,000 < range.low 66,400; shortfall (66,400-60,000)/66,400
 //   = 9.6% < the 20% high-severity threshold -> medium.
 console.log('Scenario 1: multi-hat licensed CPA, full-time');
 {
   const input = {
     client,
-    shareholder: { name: 'A', yearsExperience: 10, licenses: 'CPA', hoursPerWeek: 40 },
+    shareholder: { name: 'A', yearsExperience: 10, licenses: 'CPA', hoursPerWeek: 40, taxYear: '2025' },
     roleComponents: [
       // licenseApplies:true here (1.7): the CPA license is relevant to this hat.
       // Default tier is already 75th from 10 years' experience alone, so the
@@ -125,8 +125,9 @@ console.log('Scenario 1: multi-hat licensed CPA, full-time');
   check('market low = 62,400', r.marketApproach.low, 62400);
   check('market high = 104,000', r.marketApproach.high, 104000);
   check('income tested planned wages', r.incomeApproach.proposedSalary, 60000);
-  check('income residual = 85,410 (tested at planned 60,000 wages)', r.incomeApproach.residual, 85410, 0.01);
+  check('income residual = 85,368.00 (exact OASDI/Medicare/FUTA at TY 2025)', r.incomeApproach.residual, 85368.00, 0.01);
   check('income verdict plausible', r.incomeApproach.verdict, 'plausible');
+  check('employer payroll cost = 4,632.00', r.incomeApproach.employerPayrollTax, 4632.00, 0.01);
   checkTrue('reconciliation mentions corroboration (within 10%)', r.reconciliation.join(' ').includes('corroborate'));
   checkTrue('no capacity flag', !r.flags.some(f => f.id === 'EXCEEDS_CAPACITY'));
   const belowRange1 = r.flags.find(f => f.id === 'BELOW_RANGE');
@@ -330,7 +331,7 @@ console.log('Scenario 5: zero salary, capacity exceeded');
 {
   const input = {
     client,
-    shareholder: { name: 'E', yearsExperience: 12, licenses: '', hoursPerWeek: 40 },
+    shareholder: { name: 'E', yearsExperience: 12, licenses: '', hoursPerWeek: 40, taxYear: '2025' },
     roleComponents: [{ roleTitle: 'Accountant', soc: '132011', pctTime: 100 }],
     financials: { netIncomeBeforeOfficerComp: 40000, totalDistributions: 50000, totalOfficerWages: 0 },
     compHistory: [],
@@ -339,15 +340,16 @@ console.log('Scenario 5: zero salary, capacity exceeded');
   const ids = r.flags.map(f => f.id);
   checkTrue('ZERO_SALARY_WITH_DISTRIBUTIONS', ids.includes('ZERO_SALARY_WITH_DISTRIBUTIONS'));
   checkTrue('NEAR_ZERO_SALARY', ids.includes('NEAR_ZERO_SALARY'));
-  // EXCEEDS_CAPACITY now includes employer payroll cost on the mid figure (flat 7.65%
-  // simplification pending Phase 2's exact OASDI/Medicare/FUTA math): 83,200 x 1.0765
-  // = 89,564.80 > 40,000 NIBC -> still fires.
+  // EXCEEDS_CAPACITY now includes EXACT employer payroll cost (Phase 2) on the mid
+  // figure: 83,200 x .062=5,158.40 OASDI + 83,200x.0145=1,206.40 Medicare + 42.00 FUTA
+  // = 6,406.80; 83,200+6,406.80=89,606.80 > 40,000 NIBC -> still fires.
   checkTrue('EXCEEDS_CAPACITY', ids.includes('EXCEEDS_CAPACITY'));
   checkTrue('no BELOW_RANGE (explicit 0 salary owned by the zero-salary flags)', !ids.includes('BELOW_RANGE'));
   check('income verdict negative', r.incomeApproach.verdict, 'negative');
   // Explicit totalOfficerWages: 0 -> salaryNum is 0, not > 0, so the income approach
   // falls back to testing the recommended mid (83,200) exactly as before Phase 1.2.
-  check('residual = 40,000 - 83,200 - 6,364.80 = -49,564.80', r.incomeApproach.residual, -49564.80, 0.01);
+  check('employer payroll cost = 6,406.80 (exact OASDI/Medicare/FUTA)', r.incomeApproach.employerPayrollTax, 6406.80, 0.01);
+  check('residual = 40,000 - 83,200 - 6,406.80 = -49,606.80', r.incomeApproach.residual, -49606.80, 0.01);
 }
 
 // ============================================================ Scenario 6
@@ -502,13 +504,18 @@ console.log('Scenario 10: Watson regression — rising trend never fires');
 // ============================================================ Scenario 11
 // Multi-shareholder combined capacity (1.11). Same shareholder/component setup
 // as Scenario 5/9 (10-12 yrs exp -> 75th, 100% accountant, CdA): cost mid =
-// $40/hr x 40 x 52 = 83,200. Alone against NIBC 150,000 (plus its own ~7.65%
-// payroll cost of 6,364.80 = 89,564.80) this shareholder's OWN capacity test
-// passes (89,564.80 < 150,000 -> no EXCEEDS_CAPACITY). But a sibling
-// shareholder ("Partner") already recommends a mid of 90,000; combined:
-// 83,200 + 6,364.80 (own payroll) + 90,000 + 6,885.00 (partner's payroll,
-// 90,000 x .0765) = 186,449.80, which DOES exceed the 150,000 NIBC ->
-// COMBINED_EXCEEDS_CAPACITY must fire. Absent otherShareholders, it must not.
+// $40/hr x 40 x 52 = 83,200. No taxYear set here -> employerPayrollCost() falls
+// back to the latest wage-base year on file (2026, $184,500) with no "not on
+// file" note; since 83,200 and 90,000 are both under EVERY wage base in the
+// table, the exact OASDI/Medicare/FUTA total is identical regardless of which
+// year is used: 83,200x.062=5,158.40 + 83,200x.0145=1,206.40 + 42.00 = 6,406.80.
+// Alone against NIBC 150,000 (plus its own payroll cost, 89,606.80) this
+// shareholder's OWN capacity test passes (89,606.80 < 150,000 -> no
+// EXCEEDS_CAPACITY). But a sibling shareholder ("Partner") already recommends a
+// mid of 90,000 (payroll: 90,000x.062=5,580.00 + 90,000x.0145=1,305.00 + 42.00 =
+// 6,927.00); combined: 83,200 + 6,406.80 + 90,000 + 6,927.00 = 186,533.80, which
+// DOES exceed the 150,000 NIBC -> COMBINED_EXCEEDS_CAPACITY must fire. Absent
+// otherShareholders, it must not.
 console.log('Scenario 11: multi-shareholder combined capacity');
 {
   const baseInput = {
@@ -519,14 +526,14 @@ console.log('Scenario 11: multi-shareholder combined capacity');
     compHistory: [],
   };
   const rAlone = engine.analyze(baseInput, FIX, cfg);
-  checkTrue('no EXCEEDS_CAPACITY alone (89,564.80 < 150,000)', !rAlone.flags.some(f => f.id === 'EXCEEDS_CAPACITY'));
+  checkTrue('no EXCEEDS_CAPACITY alone (89,606.80 < 150,000)', !rAlone.flags.some(f => f.id === 'EXCEEDS_CAPACITY'));
   checkTrue('no COMBINED_EXCEEDS_CAPACITY when otherShareholders absent', !rAlone.flags.some(f => f.id === 'COMBINED_EXCEEDS_CAPACITY'));
 
   const withSibling = Object.assign({}, baseInput, {
     otherShareholders: [{ name: 'Partner', recommendedMid: 90000 }],
   });
   const rCombined = engine.analyze(withSibling, FIX, cfg);
-  checkTrue('COMBINED_EXCEEDS_CAPACITY fires (186,449.80 > 150,000 NIBC)', rCombined.flags.some(f => f.id === 'COMBINED_EXCEEDS_CAPACITY'));
+  checkTrue('COMBINED_EXCEEDS_CAPACITY fires (186,533.80 > 150,000 NIBC)', rCombined.flags.some(f => f.id === 'COMBINED_EXCEEDS_CAPACITY'));
   checkTrue('COMBINED_EXCEEDS_CAPACITY names the sibling shareholder', (rCombined.flags.find(f => f.id === 'COMBINED_EXCEEDS_CAPACITY') || {}).detail.includes('Partner'));
 }
 
@@ -555,6 +562,38 @@ console.log('Scenario 12: history/financials mismatch cross-check');
   };
   const rMatch = engine.analyze(matched, FIX, cfg);
   checkTrue('HISTORY_MISMATCH does NOT fire when figures agree', !rMatch.flags.some(f => f.id === 'HISTORY_MISMATCH'));
+}
+
+// ============================================================ Phase 2
+// Exact employer payroll cost (employerPayrollCost), tested directly. At a
+// high salary the old flat-7.65% simplification overstated employer cost
+// (the entire reason this phase exists): 250,000 x .0765 = 19,125.00 flat vs.
+// the exact TY-2025 figure below, which correctly caps OASDI at the $176,100
+// wage base instead of applying 6.2% to the full salary.
+//   OASDI: .062 x min(250,000, 176,100) = .062 x 176,100 = 10,918.20
+//   Medicare (uncapped): .0145 x 250,000 = 3,625.00
+//   FUTA (net): .006 x min(250,000, 7,000) = .006 x 7,000 = 42.00
+//   total = 14,585.20  (vs. the old flat-rate 19,125.00 -- a $4,539.80 overstatement)
+console.log('Phase 2: exact employer payroll cost at a high salary');
+{
+  const pc = engine.employerPayrollCost(250000, 2025, cfg);
+  check('OASDI capped at the 2025 wage base = 10,918.20', pc.oasdi, 10918.20, 0.01);
+  check('Medicare uncapped = 3,625.00', pc.medicare, 3625.00, 0.01);
+  check('FUTA net = 42.00', pc.futa, 42.00, 0.01);
+  check('total = 14,585.20 (old flat 7.65% would have said 19,125.00)', pc.total, 14585.20, 0.01);
+  check('wage base year used = 2025', pc.wageBaseYear, 2025);
+  checkTrue('not flagged as a clamped/out-of-range year', !pc.clampedYear);
+
+  // An out-of-range tax year (e.g. 2010, before the table) clamps to the
+  // earliest year on file AND is disclosed as such -- distinct from simply
+  // omitting a tax year, which also falls back but is NOT "clamped" (that
+  // case is exercised implicitly by every scenario above with no taxYear set).
+  const pcOld = engine.employerPayrollCost(100000, 2010, cfg);
+  check('out-of-range year clamps to the earliest table year (2015)', pcOld.wageBaseYear, 2015);
+  checkTrue('out-of-range year IS flagged as clamped', pcOld.clampedYear);
+
+  const pcNoYear = engine.employerPayrollCost(100000, null, cfg);
+  checkTrue('missing tax year falls back silently (NOT flagged as clamped)', !pcNoYear.clampedYear);
 }
 
 // ============================================================ Integration
