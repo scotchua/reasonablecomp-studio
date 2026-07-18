@@ -12,18 +12,24 @@
   return {
 
     // ---- Experience → wage percentile tiers (Cost / Multiple Components approach) ----
-    // Default percentile for each role component, from the shareholder's profile.
-    // Any component can be overridden with a documented reason; the override and
-    // reason are reproduced verbatim in the memo. The 90th percentile is never a
-    // default — it is available only as a per-component override (senior
-    // owner-operator with management scope for that component).
+    // Default percentile for each role component, from the shareholder's profile
+    // (experience only — licensure is a PER-COMPONENT floor applied separately,
+    // see licenseApplies below, not part of this shared default). Any component
+    // can be overridden with a documented reason; the override and reason are
+    // reproduced verbatim in the memo. The 90th percentile is never a default —
+    // it is available only as a per-component override (senior owner-operator
+    // with management scope for that component).
     percentiles: [10, 25, 50, 75, 90],
     experienceTiers: [
       { maxYears: 3,        percentile: 25, label: 'Less than 3 years relevant experience' },
       { maxYears: 8,        percentile: 50, label: '3–8 years relevant experience' },
-      { maxYears: Infinity, percentile: 75, label: 'More than 8 years relevant experience, or licensed specialist' },
+      { maxYears: Infinity, percentile: 75, label: 'More than 8 years relevant experience' },
     ],
-    licensedMinimumPercentile: 75, // holding a professional license floors the default tier here
+    // Holding a professional license/credential floors a role component at this
+    // percentile — but ONLY the component(s) marked licenseApplies:true, never
+    // every "hat" a shareholder wears (a driver's license has no bearing on a
+    // bookkeeping component performed by the same person).
+    licensedMinimumPercentile: 75,
 
     // ---- Market approach ----
     // A single SOC code "plainly dominates" the role at or above this share of time;
@@ -63,6 +69,12 @@
       // "Zero or near-zero salary with more than de minimis services."
       nearZeroSalary: 10000,
       deMinimisHoursPerWeek: 10,
+      // Planned wages vs. the computed reasonable-compensation range: shortfalls
+      // deeper than this share of the range's low end are flagged high (else medium).
+      belowRangeHighShortfall: 0.20,
+      // Planned wages above this multiple of the range's high end are flagged low
+      // (overpaying employment tax, not an S-corp reclassification risk).
+      aboveRangeRatio: 1.25,
     },
 
     // ---- Annual refresh staleness (dashboard) ----
@@ -78,11 +90,12 @@
       'compensationResolution',
     ],
     auditReadinessWeights: {
-      profile: 12,
+      area: 6,
+      profile: 10,
       roles: 18,
       overrides: 8,
       revenue: 16,
-      analysis: 18,
+      analysis: 16,
       flags: 12,
       approval: 10,
       evidence: 6,

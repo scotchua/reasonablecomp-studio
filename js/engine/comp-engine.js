@@ -25,6 +25,14 @@
   var H_SLOT = { 10: 1, 25: 2, 50: 3, 75: 4, 90: 5 };
   var A_SLOT = { 10: 6, 25: 7, 50: 8, 75: 9, 90: 10 };
 
+  // Blank-vs-zero: '' / null / undefined / non-numeric -> null; otherwise the number.
+  // A blank input is ABSENT, not zero. Nothing downstream may treat null as 0.
+  function num(v) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = Number(v);
+    return isFinite(n) ? n : null;
+  }
+
   function socDisplay(code) { return code.slice(0, 2) + '-' + code.slice(2); }
 
   // ---------------------------------------------------------------- data access
@@ -64,35 +72,40 @@
     return null;
   }
 
-  // Annual wage at a percentile, scaled to actual hours. Prefers the hourly
-  // percentile x hours x 52 (exact for part-time); falls back to the annual
-  // figure pro-rated on a 40-hour week for annual-only occupations.
-  function annualAtPercentile(lookup, percentile, hoursPerWeek, cfg) {
+  // Annual wage at a percentile, scaled to actual hours and actual weeks
+  // worked. Prefers the hourly percentile x effective hours x weeks worked
+  // (exact for part-time/part-year); falls back to the annual figure
+  // pro-rated on a 40-hour week for annual-only occupations. `effHours` is
+  // already resolved by resolveHours() (corroboration-gated, capped) —
+  // annual-only figures are additionally never scaled above 1.0x full-time,
+  // because salaried comparables at a given percentile already reflect long
+  // weeks (see 1.5.3).
+  function annualAtPercentile(lookup, percentile, effHours, weeksWorked, cfg) {
     var row = lookup.row;
     var ft = cfg.fullTimeHoursPerWeek;
-    var effHours = Math.min(hoursPerWeek, cfg.maxHoursScale);
-    var hoursCapped = hoursPerWeek > cfg.maxHoursScale;
     var hSlot = H_SLOT[percentile], aSlot = A_SLOT[percentile];
     var hourly = row[hSlot], annual = row[aSlot];
     var topcoded = !!(lookup.topcodeMask & ((1 << (hSlot - 1)) | (1 << (aSlot - 1))));
-    var value, basis;
+    var value, basis, annualScaleCapped = false;
     if (hourly != null) {
-      value = hourly * effHours * cfg.weeksPerYear;
-      basis = 'hourly $' + hourly.toFixed(2) + ' × ' + effHours + ' hrs/wk × ' + cfg.weeksPerYear + ' wks';
+      value = hourly * effHours * weeksWorked;
+      basis = 'hourly $' + hourly.toFixed(2) + ' × ' + effHours + ' hrs/wk × ' + weeksWorked + ' wks';
     } else if (annual != null) {
-      value = annual * (effHours / ft);
-      basis = 'annual $' + Math.round(annual).toLocaleString() + ' × ' + effHours + '/' + ft + ' hrs (annual-only occupation)';
+      var annualEffHours = Math.min(effHours, ft);
+      annualScaleCapped = effHours > ft;
+      value = annual * (annualEffHours / ft) * (weeksWorked / cfg.weeksPerYear);
+      basis = 'annual $' + Math.round(annual).toLocaleString() + ' × ' + annualEffHours + '/' + ft + ' hrs × ' + weeksWorked + '/' + cfg.weeksPerYear + ' wks (annual-only occupation)';
     } else {
       return null; // this percentile suppressed
     }
-    return { value: value, percentile: percentile, basis: basis, topcoded: topcoded, hoursCapped: hoursCapped };
+    return { value: value, percentile: percentile, basis: basis, topcoded: topcoded, annualScaleCapped: annualScaleCapped };
   }
 
   // Wage at the requested percentile, falling back to the nearest PUBLISHED
   // percentile when BLS suppressed the requested one — lower percentiles first
   // (the conservative direction), then higher. The percentile actually used is
   // recorded on the result so the memo never claims a percentile it didn't use.
-  function availableAt(lookup, percentile, hoursPerWeek, cfg) {
+  function availableAt(lookup, percentile, effHours, weeksWorked, cfg) {
     var start = PCTS.indexOf(percentile);
     var order = [percentile];
     for (var d = 1; d < PCTS.length; d++) {
@@ -100,27 +113,64 @@
       if (start + d < PCTS.length) order.push(PCTS[start + d]);
     }
     for (var i = 0; i < order.length; i++) {
-      var r = annualAtPercentile(lookup, order[i], hoursPerWeek, cfg);
+      var r = annualAtPercentile(lookup, order[i], effHours, weeksWorked, cfg);
       if (r) { r.substituted = order[i] !== percentile; r.requestedPercentile = percentile; return r; }
     }
     return null;
   }
 
+  // Resolve a shareholder's hours-per-week and weeks-worked-per-year into the
+  // effective hours used for wage scaling, applying the corroboration gate:
+  // hours at or below full-time scale normally; hours ABOVE full-time only
+  // scale up (to maxHoursScale) when hoursCorroborated is true — otherwise
+  // they are capped back to full-time and a note is required. A blank/zero
+  // entry is never silently zero: it defaults to full-time with a disclosed
+  // assumption (1.5.1).
+  function resolveHours(shareholder, cfg) {
+    var ft = cfg.fullTimeHoursPerWeek;
+    var hoursRaw = num(shareholder.hoursPerWeek);
+    var assumedFullTime = false;
+    if (hoursRaw === null || hoursRaw <= 0) { hoursRaw = ft; assumedFullTime = true; }
+    var hoursCorroborated = !!shareholder.hoursCorroborated;
+    var effHours, clampedUncorroborated = false;
+    if (hoursRaw <= ft) {
+      effHours = hoursRaw;
+    } else if (hoursCorroborated) {
+      effHours = Math.min(hoursRaw, cfg.maxHoursScale);
+    } else {
+      effHours = ft;
+      clampedUncorroborated = true;
+    }
+    var weeksWorked = num(shareholder.weeksWorkedPerYear);
+    if (weeksWorked === null || weeksWorked <= 0) weeksWorked = cfg.weeksPerYear;
+    return {
+      hoursRaw: hoursRaw,
+      effHours: effHours,
+      weeksWorked: weeksWorked,
+      assumedFullTime: assumedFullTime,
+      clampedUncorroborated: clampedUncorroborated,
+      cappedAt60: hoursCorroborated && hoursRaw > cfg.maxHoursScale,
+    };
+  }
+
   // ------------------------------------------------------------- tier defaults
 
-  function defaultPercentile(shareholder, cfg) {
-    var yrs = Number(shareholder.yearsExperience) || 0;
+  // Tier from years of relevant experience ONLY. Licensure no longer floors
+  // this shared default (1.7) — it is applied per role component instead,
+  // because a license relevant to one "hat" (e.g. a CPA license for the
+  // accounting component) has no bearing on an unrelated component (e.g.
+  // bookkeeping or driving) performed by the same shareholder.
+  function tierForYears(yrs, cfg) {
     var pct = cfg.experienceTiers[cfg.experienceTiers.length - 1].percentile;
     var label = '';
     for (var i = 0; i < cfg.experienceTiers.length; i++) {
       if (yrs < cfg.experienceTiers[i].maxYears) { pct = cfg.experienceTiers[i].percentile; label = cfg.experienceTiers[i].label; break; }
     }
-    var licensed = !!(shareholder.licenses && String(shareholder.licenses).trim());
-    if (licensed && pct < cfg.licensedMinimumPercentile) {
-      pct = cfg.licensedMinimumPercentile;
-      label = 'Licensed/certified (' + shareholder.licenses + ') — floored at ' + pct + 'th percentile';
-    }
     return { percentile: pct, reason: label || (yrs + ' years relevant experience') };
+  }
+
+  function defaultPercentile(shareholder, cfg) {
+    return tierForYears(Number(shareholder.yearsExperience) || 0, cfg);
   }
 
   function pctStep(p, step) {
@@ -130,27 +180,66 @@
 
   // ------------------------------------------------------------- cost approach
 
-  // components: [{ roleTitle, soc, pctTime (0-100), percentileOverride?, overrideReason? }]
+  // components: [{ roleTitle, soc, pctTime (0-100), percentileOverride?, overrideReason?,
+  //                licenseApplies?, yearsExperienceOverride? }]
   function costApproach(input, data, cfg) {
     var sh = input.shareholder;
-    var hours = Number(sh.hoursPerWeek) || cfg.fullTimeHoursPerWeek;
+    var hc = resolveHours(sh, cfg);
     var def = defaultPercentile(sh, cfg);
     var totalPct = 0;
-    var out = { components: [], notes: [], low: 0, mid: 0, high: 0, hoursPerWeek: hours, defaultTier: def };
+    var out = { components: [], notes: [], low: 0, mid: 0, high: 0, hoursPerWeek: hc.hoursRaw, defaultTier: def };
+
+    if (hc.assumedFullTime) out.notes.push('Hours per week not entered — full-time (' + cfg.fullTimeHoursPerWeek + ') assumed. Enter actual hours; this assumption is disclosed in the memo.');
+    if (hc.clampedUncorroborated) out.notes.push('Claimed ' + hc.hoursRaw + ' hrs/week not corroborated by time records — wage scaling capped at ' + cfg.fullTimeHoursPerWeek + '; check the corroboration box after retaining support.');
+    if (hc.cappedAt60) out.notes.push('Hours per week capped at ' + cfg.maxHoursScale + ' for wage scaling; document actual hours separately.');
+
+    // SOC group level (detailed vs. broad/minor/major) — fixtures without an
+    // `occupations` array must not crash (1.9).
+    var occLevel = {};
+    (data.occupations || []).forEach(function (o) { occLevel[o[0]] = o[2]; });
 
     input.roleComponents.forEach(function (rc) {
       var share = (Number(rc.pctTime) || 0) / 100;
       totalPct += Number(rc.pctTime) || 0;
       var lk = lookupWage(data, input.client.areaCode, rc.soc);
+
+      // Per-component tier: an explicit component-level years-experience
+      // override wins over the shareholder-wide default (1.8) — one hat
+      // priced by 20 years of dentistry shouldn't price an unrelated
+      // bookkeeping hat at the same tier.
+      var compYears = num(rc.yearsExperienceOverride);
+      var tier = compYears !== null ? tierForYears(compYears, cfg) : def;
+      var compPercentile = rc.percentileOverride ? Number(rc.percentileOverride) : tier.percentile;
+      var compReason = rc.percentileOverride
+        ? (rc.overrideReason || 'Preparer override (no reason recorded)')
+        : (compYears !== null ? (compYears + ' years relevant experience (component-specific)') : tier.reason);
+
+      // Per-component license floor (1.7): a license/credential floors ONLY
+      // the component(s) the preparer marks as requiring it, never the
+      // shareholder's whole role (that was the verified bug: a single
+      // driver's license text field used to float every hat to the 75th
+      // percentile regardless of relevance).
+      if (rc.licenseApplies && String(sh.licenses || '').trim() && !rc.percentileOverride && compPercentile <= cfg.licensedMinimumPercentile) {
+        compPercentile = cfg.licensedMinimumPercentile;
+        compReason = 'Licensed/certified (' + sh.licenses + ') applied to this component — floored at ' + cfg.licensedMinimumPercentile + 'th percentile';
+      }
+
       var comp = {
         roleTitle: rc.roleTitle,
         soc: rc.soc,
         socDisplay: socDisplay(rc.soc),
         pctTime: Number(rc.pctTime) || 0,
-        percentile: rc.percentileOverride ? Number(rc.percentileOverride) : def.percentile,
-        percentileReason: rc.percentileOverride ? (rc.overrideReason || 'Preparer override (no reason recorded)') : def.reason,
+        percentile: compPercentile,
+        percentileReason: compReason,
         overridden: !!rc.percentileOverride,
       };
+
+      var level = occLevel[rc.soc];
+      if (level && level !== 'detailed') {
+        comp.broadGroup = true;
+        out.notes.push('SOC ' + socDisplay(rc.soc) + ' is a ' + level + ' occupation group, not a detailed occupation — the wage averages dissimilar jobs; select a detailed occupation unless the group is genuinely representative.');
+      }
+
       if (!lk) {
         comp.missing = true;
         out.notes.push('No OEWS wage data found for ' + socDisplay(rc.soc) + ' at any geographic level — component excluded; total is understated until resolved.');
@@ -164,18 +253,18 @@
 
       ['low', 'mid', 'high'].forEach(function (band, bi) {
         var p = pctStep(comp.percentile, bi - 1);
-        var r = availableAt(lk, p, hours, cfg);
+        var r = availableAt(lk, p, hc.effHours, hc.weeksWorked, cfg);
         if (r) {
           comp[band] = r.value * share;
           comp[band + 'Detail'] = { percentile: r.percentile, basis: r.basis, topcoded: r.topcoded, substituted: r.substituted };
-          if (r.substituted) out.notes.push(socDisplay(rc.soc) + ' (' + rc.roleTitle + '): ' + r.requestedPercentile + 'th percentile not published; nearest published percentile (' + r.percentile + 'th) used for the ' + band + ' band.');
+          if (r.substituted) out.notes.push(socDisplay(rc.soc) + ' (' + rc.roleTitle + '): ' + r.requestedPercentile + 'th percentile not published; nearest published percentile (' + r.percentile + 'th) used for the ' + band + ' band — substitution prefers the lower percentile so suppressed data can never raise the figure.');
           if (r.topcoded) comp.topcoded = true;
-          if (r.hoursCapped) comp.hoursCapped = true;
+          if (r.annualScaleCapped) comp.annualScaleCapped = true;
           out[band] += r.value * share;
         }
       });
       if (comp.topcoded) out.notes.push(socDisplay(rc.soc) + ' (' + rc.roleTitle + '): BLS top-coded wage (' + data.topcodeNote + ') — true market wage may be higher; figure is a floor.');
-      if (comp.hoursCapped) out.notes.push('Hours per week capped at ' + cfg.maxHoursScale + ' for wage scaling; document actual hours separately.');
+      if (comp.annualScaleCapped) out.notes.push('SOC ' + socDisplay(rc.soc) + ' publishes annual-only wages; annual figures are not scaled above full-time.');
       out.components.push(comp);
     });
 
@@ -198,14 +287,19 @@
     }
     var lk = lookupWage(data, input.client.areaCode, top.soc);
     if (!lk) { res.reason = 'Dominant role ' + socDisplay(top.soc) + ' has no published OEWS data.'; return res; }
-    var hours = Number(input.shareholder.hoursPerWeek) || cfg.fullTimeHoursPerWeek;
+    var hc = resolveHours(input.shareholder, cfg);
     var pct = top.percentileOverride ? Number(top.percentileOverride) : defTier.percentile;
+    // Same per-component license floor as the cost approach (1.7): applies
+    // only when the dominant component is itself marked license-relevant.
+    if (top.licenseApplies && String(input.shareholder.licenses || '').trim() && !top.percentileOverride && pct <= cfg.licensedMinimumPercentile) {
+      pct = cfg.licensedMinimumPercentile;
+    }
     res.applicable = true;
     res.soc = top.soc; res.socDisplay = socDisplay(top.soc); res.roleTitle = top.roleTitle;
     res.pctTime = top.pctTime; res.percentile = pct;
     res.areaUsedName = lk.areaUsedName; res.fellBack = lk.fellBack;
     ['low', 'mid', 'high'].forEach(function (band, bi) {
-      var r = availableAt(lk, pctStep(pct, bi - 1), hours, cfg);
+      var r = availableAt(lk, pctStep(pct, bi - 1), hc.effHours, hc.weeksWorked, cfg);
       if (r) { res[band] = r.value; res[band + 'Detail'] = { percentile: r.percentile, basis: r.basis, topcoded: r.topcoded, substituted: r.substituted }; if (r.topcoded) res.topcoded = true; }
     });
     return res;
@@ -215,8 +309,8 @@
 
   function incomeApproach(input, proposedSalary, cfg) {
     var f = input.financials || {};
-    var nibc = Number(f.netIncomeBeforeOfficerComp);
-    var res = { applicable: isFinite(nibc), proposedSalary: proposedSalary };
+    var nibc = num(f.netIncomeBeforeOfficerComp);
+    var res = { applicable: nibc !== null, proposedSalary: proposedSalary };
     if (!res.applicable) { res.reason = 'Net income before officer compensation not provided.'; return res; }
     var payrollTax = proposedSalary * cfg.employerPayrollTaxRate;
     res.employerPayrollTax = payrollTax;
@@ -242,21 +336,35 @@
     var flags = [];
     var f = input.financials || {};
     var hist = (input.compHistory || []).slice().sort(function (a, b) { return a.taxYear - b.taxYear; });
-    var salary = Number(f.totalOfficerWages);
-    var dist = Number(f.totalDistributions);
+    var salary = num(f.totalOfficerWages);
+    var dist = num(f.totalDistributions);
+    var nibc = num(f.netIncomeBeforeOfficerComp);
     var fc = cfg.flags;
 
     // 1. Distributions-to-salary ratio (current year, then trailing 3-year aggregate)
-    if (isFinite(dist) && dist > 0) {
-      if (!salary || salary <= 0) {
+    // Blank-vs-zero matters here: ZERO_SALARY_WITH_DISTRIBUTIONS fires only when
+    // wages were explicitly entered as 0, never when the field was left blank.
+    if (dist !== null && dist > 0) {
+      if (salary === 0) {
         flags.push({ id: 'ZERO_SALARY_WITH_DISTRIBUTIONS', severity: 'high',
           title: 'Distributions with zero officer wages',
           detail: 'Distributions of $' + Math.round(dist).toLocaleString() + ' with no officer wages — the Grey / Nu-Look pattern the IRS reclassifies first. Establish wages before any further distributions.' });
-      } else if (dist / salary > fc.distributionsToSalaryRatio) {
+      } else if (salary !== null && salary > 0 && dist / salary > fc.distributionsToSalaryRatio) {
         flags.push({ id: 'DIST_RATIO_CURRENT', severity: 'medium',
           title: 'Distributions-to-salary ratio ' + (dist / salary).toFixed(1) + 'x (current year)',
           detail: 'Current-year distributions are ' + (dist / salary).toFixed(1) + '× officer wages (threshold ' + fc.distributionsToSalaryRatio + '×). Not unlawful by itself, but it is the profile examiners screen for.' });
       }
+    }
+
+    // 1b. Material inputs missing — checks that depend on them were skipped.
+    var missingInputs = [];
+    if (dist !== null && dist > 0 && salary === null) missingInputs.push('officer wages paid');
+    if (nibc === null) missingInputs.push('net income before officer compensation');
+    if (missingInputs.length) {
+      flags.push({ id: 'INPUT_INCOMPLETE', severity: 'low',
+        title: 'Analysis inputs incomplete',
+        detail: 'The following inputs were not provided, so the checks that depend on them were skipped: ' +
+          missingInputs.join(', ') + '. Enter them (or enter 0 if truly zero) and re-run.' });
     }
     var last3 = hist.slice(-3);
     if (last3.length === 3) {
@@ -269,15 +377,51 @@
       }
     }
 
-    // 2. Recommended salary exceeds earnings capacity
-    var nibc = Number(f.netIncomeBeforeOfficerComp);
-    if (isFinite(nibc) && range && range.mid > nibc) {
-      flags.push({ id: 'EXCEEDS_CAPACITY', severity: 'high',
-        title: 'Recommended salary exceeds pre-compensation earnings',
-        detail: 'Market-based mid recommendation ($' + Math.round(range.mid).toLocaleString() + ') exceeds net income before officer compensation ($' + Math.round(nibc).toLocaleString() + '). Reasonable compensation is capped by what the business can actually pay — document salary set at capacity, and revisit as earnings recover.' });
+    // 2. Recommended salary exceeds earnings capacity (including employer payroll cost).
+    // NOTE: this uses the flat employerPayrollTaxRate simplification for now — Phase 2
+    // replaces it with the exact OASDI/Medicare/FUTA computation (employerPayrollCost()).
+    if (nibc !== null && range) {
+      var capacityPayrollCost = range.mid * cfg.employerPayrollTaxRate;
+      if (range.mid + capacityPayrollCost > nibc) {
+        flags.push({ id: 'EXCEEDS_CAPACITY', severity: 'high',
+          title: 'Recommended salary exceeds pre-compensation earnings',
+          detail: 'Market-based mid recommendation ($' + Math.round(range.mid).toLocaleString() + ') plus estimated employer payroll cost ($' +
+            Math.round(capacityPayrollCost).toLocaleString() + ') exceeds net income before officer compensation ($' + Math.round(nibc).toLocaleString() +
+            '). Reasonable compensation is capped by what the business can actually pay — document salary set at capacity, and revisit as earnings recover.' });
+      }
     }
 
-    // 3. Watson drift: salary flat/down while distributions climb
+    // 2b. Combined multi-shareholder capacity (1.11): each shareholder can
+    // individually pass the capacity test against the company's FULL NIBC while
+    // their recommendations, taken together, exceed what the business can pay
+    // all owners at once. `otherShareholders` is populated by buildEngineInput
+    // from sibling shareholders' stored analyses for the same tax year.
+    if (input.otherShareholders && input.otherShareholders.length && nibc !== null && range) {
+      var ownPayrollCost = range.mid * cfg.employerPayrollTaxRate;
+      var othersMidSum = 0, othersPayrollSum = 0;
+      var otherNames = [];
+      input.otherShareholders.forEach(function (o) {
+        var m = Number(o.recommendedMid) || 0;
+        othersMidSum += m;
+        othersPayrollSum += m * cfg.employerPayrollTaxRate;
+        otherNames.push(o.name + ' ($' + Math.round(m).toLocaleString() + ')');
+      });
+      var combinedTotal = range.mid + ownPayrollCost + othersMidSum + othersPayrollSum;
+      if (combinedTotal > nibc) {
+        flags.push({ id: 'COMBINED_EXCEEDS_CAPACITY', severity: 'high',
+          title: 'Combined shareholder recommendations exceed pre-compensation earnings',
+          detail: 'This shareholder\'s recommended mid ($' + Math.round(range.mid).toLocaleString() + ', plus estimated employer payroll cost) together with ' +
+            otherNames.join(', ') + ' (each plus estimated employer payroll cost) totals $' + Math.round(combinedTotal).toLocaleString() +
+            ', which exceeds net income before officer compensation ($' + Math.round(nibc).toLocaleString() + '). Each shareholder may individually test as reasonable ' +
+            'against the company\'s full earnings, but the company cannot pay every owner the recommended figure at the same time — document the constraint or adjust the allocation.' });
+      }
+    }
+
+    // 3. Watson drift: salary flat/down while distributions climb, tested two ways —
+    // the CAGR pair (unchanged), OR a least-squares regression of salary's share of
+    // (salary + distributions) over ALL usable years (1.13). The regression catches
+    // V-shaped or noisy declines that an endpoints-only erosion test misses; the
+    // endpoint shares (sh0/sh1) are kept only for the narrative sentence below.
     if (hist.length >= fc.watson.minYears) {
       var first = hist[0], last = hist[hist.length - 1];
       var n = hist.length - 1;
@@ -289,8 +433,28 @@
         return (s + d) > 0 ? s / (s + d) * 100 : null;
       };
       var sh0 = shareOf(first), sh1 = shareOf(last);
+      // x = taxYear, y = salary share in percentage points, skipping years where
+      // salary+distributions === 0 (shareOf returns null there).
+      var pts = [];
+      hist.forEach(function (y) {
+        var sy = shareOf(y);
+        if (sy !== null) pts.push({ x: Number(y.taxYear), y: sy });
+      });
+      var erosion = null;
+      if (pts.length >= 3) {
+        var xbar = pts.reduce(function (s, p) { return s + p.x; }, 0) / pts.length;
+        var ybar = pts.reduce(function (s, p) { return s + p.y; }, 0) / pts.length;
+        var sxy = pts.reduce(function (s, p) { return s + (p.x - xbar) * (p.y - ybar); }, 0);
+        var sxx = pts.reduce(function (s, p) { return s + (p.x - xbar) * (p.x - xbar); }, 0);
+        if (sxx > 0) {
+          var slope = sxy / sxx;
+          var xs = pts.map(function (p) { return p.x; });
+          var span = Math.max.apply(null, xs) - Math.min.apply(null, xs);
+          erosion = -slope * span;
+        }
+      }
       var drifted = (sC !== null && dC !== null && sC <= fc.watson.salaryStallCagr && dC >= fc.watson.distributionGrowthCagr) ||
-                    (sh0 !== null && sh1 !== null && (sh0 - sh1) >= fc.watson.compShareErosionPoints);
+                    (erosion !== null && erosion >= fc.watson.compShareErosionPoints);
       if (drifted) {
         flags.push({ id: 'WATSON_DRIFT', severity: 'high',
           title: 'Watson pattern: salary stalled while distributions grew',
@@ -302,8 +466,8 @@
     }
 
     // 4. Shareholder paid below comparable non-shareholder staff
-    var staffWage = Number(f.highestNonShareholderWage);
-    if (isFinite(staffWage) && staffWage > 0 && isFinite(salary) && salary > 0 && salary < staffWage) {
+    var staffWage = num(f.highestNonShareholderWage);
+    if (staffWage !== null && staffWage > 0 && salary !== null && salary > 0 && salary < staffWage) {
       flags.push({ id: 'BELOW_STAFF', severity: 'medium',
         title: 'Officer paid less than highest non-shareholder employee',
         detail: 'Officer wages ($' + Math.round(salary).toLocaleString() + ') are below the highest non-shareholder wage ($' + Math.round(staffWage).toLocaleString() + '). Courts treat internal comparables as strong evidence; be prepared to explain the differential in duties.' });
@@ -311,10 +475,59 @@
 
     // 5. Near-zero salary with more than de minimis services
     var hours = Number(input.shareholder.hoursPerWeek) || 0;
-    if (isFinite(salary) && salary < fc.nearZeroSalary && hours >= fc.deMinimisHoursPerWeek) {
+    if (salary !== null && salary < fc.nearZeroSalary && hours >= fc.deMinimisHoursPerWeek) {
       flags.push({ id: 'NEAR_ZERO_SALARY', severity: 'high',
         title: 'Near-zero salary with substantial services',
         detail: 'Officer wages under $' + fc.nearZeroSalary.toLocaleString() + ' while performing ~' + hours + ' hours/week of services. This is the fact pattern of Grey and Nu-Look; wages must reflect services actually rendered.' });
+    }
+
+    // 6. Planned wages below (or far above) the computed reasonable-compensation range.
+    if (salary !== null && salary > 0 && range && range.low > 0 && salary < range.low) {
+      var shortfallPct = (range.low - salary) / range.low;
+      flags.push({ id: 'BELOW_RANGE', severity: shortfallPct > fc.belowRangeHighShortfall ? 'high' : 'medium',
+        title: 'Planned wages below the reasonable-compensation range',
+        detail: 'Planned officer wages ($' + Math.round(salary).toLocaleString() + ') fall $' + Math.round(range.low - salary).toLocaleString() +
+          ' (' + Math.round(shortfallPct * 100) + '%) below the low end of the reconciled range ($' + Math.round(range.low).toLocaleString() +
+          '). This is the primary reclassification exposure this workpaper exists to address — document the justification or adjust the wage.' });
+    }
+    if (salary !== null && range && range.high > 0 && salary > range.high * fc.aboveRangeRatio) {
+      flags.push({ id: 'ABOVE_RANGE', severity: 'low',
+        title: 'Planned wages well above the reasonable-compensation range',
+        detail: 'Planned wages exceed the high end of the range by more than ' + Math.round((fc.aboveRangeRatio - 1) * 100) +
+          '% — not an IRS reclassification risk for an S corporation, but it overpays employment tax; confirm intent.' });
+    }
+
+    // 7. Current-year history cross-check (1.12): salary lives in two places —
+    // the comp-history row for the tax year, and financials.totalOfficerWages —
+    // and can silently disagree. Same check for distributions.
+    var taxYearNum = Number((input.shareholder || {}).taxYear);
+    if (!isNaN(taxYearNum)) {
+      var curHist = null;
+      for (var hi = 0; hi < hist.length; hi++) {
+        if (Number(hist[hi].taxYear) === taxYearNum) { curHist = hist[hi]; break; }
+      }
+      if (curHist) {
+        var histSalary = num(curHist.salaryPaid);
+        var histDist = num(curHist.distributionsPaid);
+        var mismatches = [];
+        if (histSalary !== null && salary !== null) {
+          var salThresh = Math.max(100, 0.01 * Math.max(Math.abs(histSalary), Math.abs(salary)));
+          if (Math.abs(histSalary - salary) > salThresh) {
+            mismatches.push('salary paid ($' + Math.round(histSalary).toLocaleString() + ' in the comp-history record vs. $' + Math.round(salary).toLocaleString() + ' in financials)');
+          }
+        }
+        if (histDist !== null && dist !== null) {
+          var distThresh = Math.max(100, 0.01 * Math.max(Math.abs(histDist), Math.abs(dist)));
+          if (Math.abs(histDist - dist) > distThresh) {
+            mismatches.push('distributions paid ($' + Math.round(histDist).toLocaleString() + ' in the comp-history record vs. $' + Math.round(dist).toLocaleString() + ' in financials)');
+          }
+        }
+        if (mismatches.length) {
+          flags.push({ id: 'HISTORY_MISMATCH', severity: 'medium',
+            title: 'Current-year figures disagree between comp history and financials',
+            detail: 'For tax year ' + taxYearNum + ', the comp-history record and financials disagree on ' + mismatches.join(' and ') + '. Reconcile the two before finalizing.' });
+        }
+      }
     }
 
     return flags;
@@ -355,8 +568,16 @@
     var defTier = defaultPercentile(input.shareholder, cfg);
     var cost = costApproach(input, data, cfg);
     var market = marketApproach(input, data, cfg, defTier);
-    var proposed = Number(input.proposedSalary) || Math.round(cost.mid);
-    var income = incomeApproach(input, proposed, cfg);
+    // Test the shareholder's actual planned wages (not the tool's own recommendation —
+    // that would be circular). Falls back to the recommended mid only when no planned
+    // wage was entered, so the income approach always has a number to test.
+    var salaryNum = num((input.financials || {}).totalOfficerWages);
+    var tested = (salaryNum !== null && salaryNum > 0) ? salaryNum : Math.round(cost.mid);
+    var testedBasis = (salaryNum !== null && salaryNum > 0)
+      ? 'planned officer wages as entered'
+      : 'the recommended mid figure (no planned officer wages were entered)';
+    var income = incomeApproach(input, tested, cfg);
+    income.salaryBasis = testedBasis;
     var rec = reconcile(cost, market, income, cfg);
     var flags = computeFlags(input, rec.range, cfg);
     if (income.verdict === 'negative') {
@@ -380,6 +601,7 @@
 
   return {
     analyze: analyze,
+    num: num,
     lookupWage: lookupWage,
     annualAtPercentile: annualAtPercentile,
     defaultPercentile: defaultPercentile,

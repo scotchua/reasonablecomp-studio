@@ -41,6 +41,7 @@
     if (!sh.years[year]) {
       sh.years[year] = {
         education: '', licenses: '', yearsExperience: '', hoursPerWeek: 40,
+        weeksWorkedPerYear: 52, hoursCorroborated: false,
         seasonality: '', duties: '', writtenAgreement: false, setInAdvance: false, formulaNote: '',
         roleComponents: [], financials: {}, flagResponses: {}, analysis: null,
         revenueSources: { shareholderServicesPct: 0, employeeServicesPct: 0, capitalEquipmentPct: 0, notes: '' },
@@ -52,6 +53,11 @@
     rec.revenueSources = rec.revenueSources || { shareholderServicesPct: 0, employeeServicesPct: 0, capitalEquipmentPct: 0, notes: '' };
     rec.evidence = rec.evidence || {};
     rec.approval = rec.approval || { approvedBy: '', approvedDate: '', conclusionNotes: '' };
+    // Patch onto records created before these fields existed (import of an
+    // older client file, or a year record started under RCT-2.0) — blank
+    // defaults keep prior analyses' assumptions unchanged until re-run.
+    if (rec.weeksWorkedPerYear === undefined || rec.weeksWorkedPerYear === null || rec.weeksWorkedPerYear === '') rec.weeksWorkedPerYear = 52;
+    if (rec.hoursCorroborated === undefined) rec.hoursCorroborated = false;
     return rec;
   }
 
@@ -214,7 +220,7 @@
   function addClient() {
     var name = prompt('Client (company) name:');
     if (!name) return;
-    var c = { id: newId(), name: name, entityType: 'S-Corp', state: '', areaCode: '0017660', fiscalYearEnd: '12/31', shareholders: [] };
+    var c = { id: newId(), name: name, entityType: 'S-Corp', state: '', areaCode: '', fiscalYearEnd: '12/31', shareholders: [] };
     store.clients.push(c); save(); nav('#/client/' + c.id);
   }
 
@@ -241,8 +247,11 @@
     grid.appendChild(field('Fiscal year end', c.fiscalYearEnd, function (v) { c.fiscalYearEnd = v; }));
     var areaSel = el('div', {}, [el('label', {}, ['Principal work area (OEWS)'])]);
     var sel = el('select', {
-      onchange: function () { c.areaCode = sel.value; save(); },
+      onchange: function () { c.areaCode = sel.value; save(); render(); },
     });
+    var placeholderOpt = el('option', { value: '' }, ['(select the principal work area)']);
+    if (!c.areaCode) placeholderOpt.selected = true;
+    sel.appendChild(placeholderOpt);
     DATA.areas.slice().sort(function (a, b) {
       var order = { N: 0, S: 1, M: 2 };
       return order[a[2]] - order[b[2]] || a[1].localeCompare(b[1]);
@@ -311,7 +320,7 @@
     root.appendChild(head);
 
     var currentInputFingerprint = INTEGRITY.fingerprint(buildEngineInput(c, sh, year));
-    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, currentInputFingerprint);
+    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, currentInputFingerprint, c);
     var health = el('section', { class: 'readiness-card ' + (readiness.finalizable ? 'ready' : 'open') });
     var ring = el('div', { class: 'score-ring', style: '--score:' + readiness.score }, [
       el('strong', {}, [readiness.score + '%']),
@@ -334,9 +343,12 @@
     fc.appendChild(el('h3', { style: 'margin-top:0' }, ['Facts & circumstances (multi-factor test inputs)']));
     var g = el('div', { class: 'grid c3' });
     g.appendChild(selField('Education', yr.education, [''].concat(CFG.educationLevels), function (v) { yr.education = v; }));
-    g.appendChild(txtField('Licenses / certifications', yr.licenses, function (v) { yr.licenses = v; }, 'e.g. CPA, PE, RN — raises the default wage percentile'));
+    g.appendChild(txtField('Licenses / certifications', yr.licenses, function (v) { yr.licenses = v; }, 'e.g. CPA, PE, RN — mark "Lic?" on the role components this applies to'));
     g.appendChild(numField('Years of relevant experience', yr.yearsExperience, function (v) { yr.yearsExperience = v; }));
-    g.appendChild(numField('Hours per week devoted', yr.hoursPerWeek, function (v) { yr.hoursPerWeek = v; }));
+    var hoursCell = el('div', {}, [el('label', {}, ['Hours per week devoted']), el('input', { type: 'number', value: yr.hoursPerWeek == null || yr.hoursPerWeek === '' ? '' : yr.hoursPerWeek, onchange: function (e) { yr.hoursPerWeek = e.target.value === '' ? null : Number(e.target.value); save(); render(); } })]);
+    hoursCell.appendChild(checkLine('Hours above 40/week are supported by retained time records (calendar, time study)', yr.hoursCorroborated, function (v) { yr.hoursCorroborated = v; }));
+    g.appendChild(hoursCell);
+    g.appendChild(numField('Weeks worked per year', yr.weeksWorkedPerYear, function (v) { yr.weeksWorkedPerYear = v; }));
     g.appendChild(txtField('Seasonality / part-year note', yr.seasonality, function (v) { yr.seasonality = v; }, 'blank = year-round'));
     fc.appendChild(g);
     fc.appendChild(el('label', { style: 'margin-top:10px' }, ['Duties and responsibilities actually performed (reported verbatim in the memo; tie to the role components below)']));
@@ -348,11 +360,13 @@
     // ---- role components ----
     var rcCard = el('div', { class: 'card' });
     rcCard.appendChild(el('h3', { style: 'margin-top:0' }, ['Role components — the "hats"']));
-    rcCard.appendChild(el('p', { class: 'muted' }, ['Decompose what ' + sh.name + ' actually does into occupations. Percentile defaults from experience/licensure (' + describeTier() + '); override per component only with a documented reason.']));
+    rcCard.appendChild(el('p', { class: 'muted' }, ['Decompose what ' + sh.name + ' actually does into occupations. Percentile defaults from experience (' + describeTier() + '); check "Lic?" on a component only if the license/certification entered above is actually relevant to that hat; override per component only with a documented reason.']));
     var tbl = el('table', { class: 'data' });
     tbl.appendChild(el('tr', {}, [
       el('th', {}, ['Role / hat']), el('th', {}, ['SOC occupation']), el('th', { class: 'num' }, ['% time']),
-      el('th', {}, ['Percentile']), el('th', {}, ['Override reason']), el('th', {}, ['']),
+      el('th', {}, ['Percentile']), el('th', { class: 'num', title: 'Component-specific years of experience — blank inherits the shareholder-level figure above' }, ['Yrs (override)']),
+      el('th', { title: 'The professional license/credential applies to this hat' }, ['Lic?']),
+      el('th', {}, ['Override reason']), el('th', {}, ['']),
     ]));
     yr.roleComponents.forEach(function (rc, idx) {
       var tr = el('tr');
@@ -366,6 +380,10 @@
         pctSel.appendChild(op);
       });
       tr.appendChild(el('td', { style: 'width:130px' }, [pctSel]));
+      tr.appendChild(el('td', { class: 'num', style: 'width:90px' }, [el('input', { type: 'number', value: rc.yearsExperienceOverride == null || rc.yearsExperienceOverride === '' ? '' : rc.yearsExperienceOverride, placeholder: 'inherit', title: 'Blank inherits the shareholder-level years of experience', onchange: function (e) { rc.yearsExperienceOverride = e.target.value === '' ? null : Number(e.target.value); save(); } })]));
+      var licCb = el('input', { type: 'checkbox', title: 'The professional license/credential applies to this hat', onchange: function (e) { rc.licenseApplies = e.target.checked; save(); } });
+      licCb.checked = !!rc.licenseApplies;
+      tr.appendChild(el('td', { style: 'text-align:center' }, [licCb]));
       tr.appendChild(el('td', {}, [el('input', { value: rc.overrideReason || '', placeholder: 'required if overridden', onchange: function (e) { rc.overrideReason = e.target.value; save(); } })]));
       tr.appendChild(el('td', {}, [el('button', { class: 'ghost small', onclick: function () { yr.roleComponents.splice(idx, 1); save(); render(); } }, ['✕'])]));
       tbl.appendChild(tr);
@@ -528,20 +546,40 @@
 
   function buildEngineInput(c, sh, year) {
     var yr = yearRec(sh, year);
+    // Every OTHER shareholder of this client with a stored analysis for the same
+    // tax year (1.11) -- feeds COMBINED_EXCEEDS_CAPACITY so one shareholder's
+    // recommendation is tested against what the company can pay ALL owners at
+    // once, not just this one against the company's entire NIBC. Known ripple:
+    // this makes otherShareholders part of the engine input, so running a
+    // sibling's analysis changes THIS shareholder's input fingerprint (the
+    // dashboard pill flips to "inputs changed - re-run"). That's self-healing —
+    // re-run picks up the sibling's latest number — and is documented in the
+    // README workflow section, not "fixed".
+    var otherShareholders = (c.shareholders || [])
+      .filter(function (sib) { return sib.id !== sh.id; })
+      .map(function (sib) {
+        var sibYr = (sib.years || {})[year];
+        if (!sibYr || !sibYr.analysis || !sibYr.analysis.range) return null;
+        return { name: sib.name, recommendedMid: sibYr.analysis.range.mid };
+      })
+      .filter(function (x) { return !!x; });
     return {
       client: { name: c.name, areaCode: c.areaCode },
       shareholder: {
         name: sh.name, taxYear: year,
         education: yr.education, licenses: yr.licenses,
         yearsExperience: yr.yearsExperience, hoursPerWeek: yr.hoursPerWeek,
+        weeksWorkedPerYear: yr.weeksWorkedPerYear, hoursCorroborated: yr.hoursCorroborated,
       },
       roleComponents: yr.roleComponents.filter(function (rc) { return rc.soc; }),
       financials: yr.financials,
       compHistory: sh.compHistory || [],
+      otherShareholders: otherShareholders,
     };
   }
 
   function runAnalysis(c, sh, year) {
+    if (!c.areaCode) { toast('Select the client\'s principal OEWS work area before running an analysis.'); return; }
     var yr = yearRec(sh, year);
     var input = buildEngineInput(c, sh, year);
     if (!input.roleComponents.length) { toast('Add at least one role component with an occupation first.'); return; }
@@ -551,7 +589,7 @@
       result.inputSnapshot = JSON.parse(JSON.stringify(input)); // methodology snapshot: inputs frozen with the result
       result.inputFingerprint = INTEGRITY.fingerprint(result.inputSnapshot);
       result.analysisFingerprint = INTEGRITY.fingerprint({
-        methodology: 'RCT-2.0',
+        methodology: 'RCT-2.1',
         generatedAt: result.generatedAt,
         oewsRelease: result.oewsRelease,
         inputSnapshot: result.inputSnapshot,
@@ -611,7 +649,7 @@
     a.costApproach.components.forEach(function (cc) {
       t.appendChild(el('tr', {}, [
         el('td', {}, [cc.roleTitle || occTitle(cc.soc)]),
-        el('td', {}, [cc.socDisplay + ' ' + occTitle(cc.soc)]),
+        el('td', {}, [cc.socDisplay + ' ' + occTitle(cc.soc) + (cc.broadGroup ? ' (group)' : '')]),
         el('td', {}, [cc.missing ? 'NO DATA' : cc.areaUsedName + (cc.fellBack ? ' (fallback)' : '')]),
         el('td', {}, [cc.percentile + 'th — ' + cc.percentileReason]),
         el('td', { class: 'num' }, [cc.pctTime + '%']),
@@ -665,9 +703,9 @@
 
   function buildMemoModel(c, sh, year) {
     var yr = yearRec(sh, year);
-    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, INTEGRITY.fingerprint(buildEngineInput(c, sh, year)));
+    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, INTEGRITY.fingerprint(buildEngineInput(c, sh, year)), c);
     var workpaperRecord = {
-      methodology: 'RCT-2.0',
+      methodology: 'RCT-2.1',
       client: c,
       shareholder: { id: sh.id, name: sh.name, compHistory: sh.compHistory || [] },
       taxYear: year,
@@ -702,7 +740,7 @@
   function exportClient(c) {
     c.lastExportedAt = new Date().toISOString();
     save();
-    var payload = { format: 'rct-client', version: 2, exported: c.lastExportedAt, methodology: 'RCT-2.0', oewsRelease: DATA.release, client: c };
+    var payload = { format: 'rct-client', version: 3, exported: c.lastExportedAt, methodology: 'RCT-2.1', oewsRelease: DATA.release, client: c };
     payload.exportFingerprint = INTEGRITY.fingerprint(payload);
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     var a = document.createElement('a');
@@ -726,6 +764,8 @@
             var verify = {};
             Object.keys(obj).forEach(function (key) { if (key !== 'exportFingerprint') verify[key] = obj[key]; });
             if (INTEGRITY.fingerprint(verify) !== claimed) throw new Error('fingerprint mismatch - the exported record changed after it was created');
+          } else {
+            if (!confirm('This file has NO integrity fingerprint — it either predates fingerprinting or the fingerprint was removed. Its contents cannot be verified. Import anyway?')) return;
           }
           var cl = obj.client || obj;
           if (!cl || !cl.name) throw new Error('not a client file');
