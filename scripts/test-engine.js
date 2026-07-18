@@ -688,15 +688,31 @@ console.log('Phase 4a: data loader (fixture-based; real generated files land in 
 
 // ============================================================ Integration
 // Run against the REAL generated data file: internal consistency only.
-console.log('Integration: real May-release OEWS data');
+console.log('Integration: real May-release OEWS data (core + per-state files via the loader)');
 {
   global.window = {};
-  require(path.join(__dirname, '..', 'js', 'data', 'oews-data.js'));
+  const loader = require(path.join(__dirname, '..', 'js', 'data', 'loader.js'));
+  global.window.RCT_DATA_REGISTER = loader.register;
+  require(path.join(__dirname, '..', 'js', 'data', 'oews-core.js'));
   const DATA = global.window.RCT_DATA;
   checkTrue('release label present', /May \d{4}/.test(DATA.release));
-  checkTrue('has Coeur d\'Alene', DATA.areas.some(a => a[1].includes("Coeur d'Alene")));
-  checkTrue('has Spokane MSA', DATA.areas.some(a => a[1].includes('Spokane-Spokane Valley')));
+  checkTrue('has Coeur d\'Alene in the area index', DATA.areas.some(a => a[1].includes("Coeur d'Alene")));
+  checkTrue('has Spokane MSA in the area index', DATA.areas.some(a => a[1].includes('Spokane-Spokane Valley')));
   checkTrue('has all-state coverage (>= 50 S areas)', DATA.areas.filter(a => a[2] === 'S').length >= 50);
+  checkTrue('core carries a per-state manifest for >= 50 states/territories', !!DATA.states && Object.keys(DATA.states).length >= 50);
+  checkTrue('core does NOT carry Idaho wage rows before its state file loads', !DATA.wages['1600000']);
+
+  // Coeur d'Alene lookup before loading Idaho's part file: only national wages
+  // are in memory, so the lookup must fall back to national (or be absent),
+  // never silently resolve at the (not-yet-loaded) requested area.
+  let lkBefore = null;
+  try { lkBefore = engine.lookupWage(DATA, '0017660', '132011'); } catch (e) { lkBefore = null; }
+  checkTrue('Coeur d\'Alene lookup before loading Idaho falls back to national (or is absent)', !lkBefore || lkBefore.areaUsed === '0000000');
+
+  require(path.join(__dirname, '..', 'js', 'data', 'oews', 'state-16.js'));
+  checkTrue('Idaho wage rows are present after loading state-16.js', !!DATA.wages['1600000']);
+  const lkAfter = engine.lookupWage(DATA, '0017660', '132011');
+  checkTrue('Coeur d\'Alene lookup resolves at the requested area once Idaho is loaded', !!lkAfter && lkAfter.areaUsed === '0017660' && !lkAfter.fellBack);
 
   const input = {
     client: { name: 'Real Co', areaCode: '0017660' },

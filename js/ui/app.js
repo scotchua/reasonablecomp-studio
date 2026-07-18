@@ -13,6 +13,7 @@
   var ENG = window.RCTEngine;
   var INTEGRITY = window.RCTIntegrity;
   var READINESS = window.RCTReadiness;
+  var LOADER = window.RCTDataLoader;
   // A distinct storage key prevents a white-label copy from reading data saved
   // by a firm-branded installation on the same computer.
   var LS_KEY = 'reasonablecomp-studio-whitelabel-v1';
@@ -247,8 +248,9 @@
     grid.appendChild(field('Fiscal year end', c.fiscalYearEnd, function (v) { c.fiscalYearEnd = v; }));
     var areaSel = el('div', {}, [el('label', {}, ['Principal work area (OEWS)'])]);
     var sel = el('select', {
-      onchange: function () { c.areaCode = sel.value; save(); render(); },
+      onchange: function () { c.areaCode = sel.value; save(); render(); if (c.areaCode) LOADER.ensure(c.areaCode, function () {}); },
     });
+    if (c.areaCode) LOADER.ensure(c.areaCode, function () {}); // fire-and-forget prefetch
     var placeholderOpt = el('option', { value: '' }, ['(select the principal work area)']);
     if (!c.areaCode) placeholderOpt.selected = true;
     sel.appendChild(placeholderOpt);
@@ -584,32 +586,37 @@
     var yr = yearRec(sh, year);
     var input = buildEngineInput(c, sh, year);
     if (!input.roleComponents.length) { toast('Add at least one role component with an occupation first.'); return; }
-    try {
-      var result = ENG.analyze(input, DATA, CFG);
-      result.generatedAt = new Date().toISOString();
-      result.inputSnapshot = JSON.parse(JSON.stringify(input)); // methodology snapshot: inputs frozen with the result
-      result.inputFingerprint = INTEGRITY.fingerprint(result.inputSnapshot);
-      result.analysisFingerprint = INTEGRITY.fingerprint({
-        methodology: 'RCT-2.1',
-        generatedAt: result.generatedAt,
-        oewsRelease: result.oewsRelease,
-        inputSnapshot: result.inputSnapshot,
-        costApproach: result.costApproach,
-        marketApproach: result.marketApproach,
-        incomeApproach: result.incomeApproach,
-        range: result.range,
-        reconciliation: result.reconciliation,
-        flags: result.flags,
-      });
-      yr.analysis = result;
-      // prune flag responses for flags that no longer exist
-      var ids = result.flags.map(function (f) { return f.id; });
-      Object.keys(yr.flagResponses || {}).forEach(function (k) { if (ids.indexOf(k) === -1) delete yr.flagResponses[k]; });
-      save(); render();
-      toast('Analysis complete — ' + fmt.usd(result.range.mid) + ' mid recommendation');
-    } catch (e) {
-      toast('Analysis failed: ' + e.message);
-    }
+    // The client's work area may live in a per-state wage file not yet loaded
+    // (see js/data/loader.js) -- ensure it before running the analysis.
+    LOADER.ensure(c.areaCode, function (err) {
+      if (err) { toast(err.message); return; }
+      try {
+        var result = ENG.analyze(input, DATA, CFG);
+        result.generatedAt = new Date().toISOString();
+        result.inputSnapshot = JSON.parse(JSON.stringify(input)); // methodology snapshot: inputs frozen with the result
+        result.inputFingerprint = INTEGRITY.fingerprint(result.inputSnapshot);
+        result.analysisFingerprint = INTEGRITY.fingerprint({
+          methodology: 'RCT-2.1',
+          generatedAt: result.generatedAt,
+          oewsRelease: result.oewsRelease,
+          inputSnapshot: result.inputSnapshot,
+          costApproach: result.costApproach,
+          marketApproach: result.marketApproach,
+          incomeApproach: result.incomeApproach,
+          range: result.range,
+          reconciliation: result.reconciliation,
+          flags: result.flags,
+        });
+        yr.analysis = result;
+        // prune flag responses for flags that no longer exist
+        var ids = result.flags.map(function (f) { return f.id; });
+        Object.keys(yr.flagResponses || {}).forEach(function (k) { if (ids.indexOf(k) === -1) delete yr.flagResponses[k]; });
+        save(); render();
+        toast('Analysis complete — ' + fmt.usd(result.range.mid) + ' mid recommendation');
+      } catch (e) {
+        toast('Analysis failed: ' + e.message);
+      }
+    });
   }
 
   function renderAnalysis(c, sh, year, a) {
