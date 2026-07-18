@@ -65,8 +65,15 @@
       },
     },
     // Residual return below this share of net income before officer comp raises
-    // the "thin residual" plausibility flag (not a veto of the market/cost figures).
+    // the "thin residual" plausibility flag -- used ONLY as the weaker residual-
+    // share screen when beginning shareholder equity was not provided (Phase 3).
     thinResidualShare: 0.10,
+    // Return on beginning shareholder equity, the true independent-investor test:
+    // below `required` is a "thin" plausibility flag (not a veto). 10% is a
+    // defensible floor of what a passive investor demands over the long run;
+    // `strong` is a reference point for a comfortably-above-required return, not
+    // itself a distinct verdict tier.
+    investorReturn: { required: 0.10, strong: 0.20 },
 
     // ---- Red-flag thresholds ----
     flags: {

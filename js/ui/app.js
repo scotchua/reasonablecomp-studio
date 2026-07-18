@@ -410,6 +410,7 @@
     fg.appendChild(numField('Total distributions to this shareholder', f.totalDistributions, function (v) { f.totalDistributions = v; }));
     fg.appendChild(numField('Officer wages paid (current/planned)', f.totalOfficerWages, function (v) { f.totalOfficerWages = v; }));
     fg.appendChild(numField('Highest non-shareholder employee wage', f.highestNonShareholderWage, function (v) { f.highestNonShareholderWage = v; }));
+    fg.appendChild(numField('Total shareholder equity (book value, beginning of year)', f.shareholderEquity, function (v) { f.shareholderEquity = v; }));
     fin.appendChild(fg);
     fin.appendChild(el('label', { style: 'margin-top:8px' }, ['Highest-paid non-shareholder role (for the internal-comparable factor)']));
     fin.appendChild(el('input', { value: f.highestNonShareholderRole || '', onchange: function (e) { f.highestNonShareholderRole = e.target.value; save(); } }));

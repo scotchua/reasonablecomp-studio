@@ -350,15 +350,42 @@
       (payroll.clampedYear ? ' Wage base for ' + payroll.requestedYear + ' not on file; the ' + payroll.wageBaseYear + ' base was used.' : '');
     res.residual = nibc - proposedSalary - payroll.total;
     res.residualShare = nibc > 0 ? res.residual / nibc : null;
+
+    // Return on beginning shareholder equity is the true independent-investor
+    // test the IRS Job Aid describes; the residual-share screen above is a
+    // weaker proxy used only when equity was never provided (Phase 3).
+    var equity = num(f.shareholderEquity);
+    var hasEquity = equity !== null && equity > 0;
+    res.equity = hasEquity ? equity : null;
+    res.roe = hasEquity ? res.residual / equity : null;
+    res.method = hasEquity ? 'return on equity' : 'residual-share screen';
+
     if (res.residual < 0) {
       res.verdict = 'negative';
       res.narrative = 'The proposed salary exceeds what net income before officer compensation can support; an unrelated investor would retain a negative return. The market-based figure still controls, but the company’s capacity constraint must be documented (e.g., salary set at capacity with the shortfall explained).';
-    } else if (res.residualShare !== null && res.residualShare < cfg.thinResidualShare) {
-      res.verdict = 'thin';
-      res.narrative = 'After the proposed salary, the residual return to the company is under ' + Math.round(cfg.thinResidualShare * 100) + '% of pre-compensation earnings. An independent investor test is strained but not failed; document why the owner’s services account for substantially all of the enterprise’s earnings.';
+    } else if (hasEquity) {
+      if (res.roe < cfg.investorReturn.required) {
+        res.verdict = 'thin';
+        res.narrative = 'After the tested compensation, the return on beginning shareholder equity is ' + (res.roe * 100).toFixed(1) +
+          '% — below the ' + Math.round(cfg.investorReturn.required * 100) + '% an independent investor would plausibly require. ' +
+          'Document why the owner’s services account for substantially all of the enterprise’s earnings, or revisit the wage.';
+      } else {
+        res.verdict = 'plausible';
+        res.narrative = 'After the tested compensation and employer payroll cost, the company earns a ' + (res.roe * 100).toFixed(1) +
+          '% return on beginning shareholder equity — a return an independent investor could accept. The independent investor test does not contradict the market-based figure.';
+      }
     } else {
-      res.verdict = 'plausible';
-      res.narrative = 'After the proposed salary and employer payroll cost, the company retains a residual return an unrelated investor could find acceptable. The independent investor test does not contradict the market-based figure.';
+      var weakerForm = 'Book equity was not provided, so only a residual-share screen was performed (residual as a share of ' +
+        'pre-compensation earnings). This is a weaker form of the independent investor test; enter beginning shareholder equity ' +
+        'for the full return-on-equity analysis. ';
+      if (res.residualShare !== null && res.residualShare < cfg.thinResidualShare) {
+        res.verdict = 'thin';
+        res.narrative = weakerForm + 'After the proposed salary, the residual return to the company is under ' + Math.round(cfg.thinResidualShare * 100) +
+          '% of pre-compensation earnings. An independent investor test is strained but not failed; document why the owner’s services account for substantially all of the enterprise’s earnings.';
+      } else {
+        res.verdict = 'plausible';
+        res.narrative = weakerForm + 'After the proposed salary and employer payroll cost, the company retains a residual return an unrelated investor could find acceptable. The independent investor test does not contradict the market-based figure.';
+      }
     }
     return res;
   }

@@ -596,6 +596,44 @@ console.log('Phase 2: exact employer payroll cost at a high salary');
   checkTrue('missing tax year falls back silently (NOT flagged as clamped)', !pcNoYear.clampedYear);
 }
 
+// ============================================================ Phase 3
+// Return on equity (ROE), the true independent-investor test, vs. the weaker
+// residual-share screen used only when equity isn't provided. Same NIBC/tested-
+// salary/tax-year as Scenario 1: NIBC 150,000, tested 60,000, TY 2025 -> exact
+// payroll 4,632.00, residual 85,368.00 (Phase 2 math).
+console.log('Phase 3: return on equity vs. residual-share screen');
+{
+  const baseFinancials = { netIncomeBeforeOfficerComp: 150000 };
+  const shareholder = { taxYear: '2025' };
+
+  // Equity 400,000 -> ROE 85,368/400,000 = 21.3% -> plausible (>= 10% required).
+  const rHigh = engine.incomeApproach(
+    { financials: Object.assign({}, baseFinancials, { shareholderEquity: 400000 }), shareholder },
+    60000, cfg
+  );
+  check('ROE (equity 400k) = 21.3%', rHigh.roe * 100, 21.3, 0.1);
+  check('method = return on equity', rHigh.method, 'return on equity');
+  check('verdict plausible at 21.3% ROE', rHigh.verdict, 'plausible');
+
+  // Equity 1,200,000 -> ROE 85,368/1,200,000 = 7.1% -> THIN, even though the
+  // residual-share screen alone (85,368/150,000 = 56.9%) would have called this
+  // "plausible" -- that gap is exactly what Phase 3 closes for capital-intensive
+  // businesses the old residual-share screen was blind to.
+  const rLow = engine.incomeApproach(
+    { financials: Object.assign({}, baseFinancials, { shareholderEquity: 1200000 }), shareholder },
+    60000, cfg
+  );
+  check('ROE (equity 1.2M) = 7.1%', rLow.roe * 100, 7.1, 0.1);
+  check('verdict thin at 7.1% ROE (residual-share screen alone would say plausible)', rLow.verdict, 'thin');
+
+  // Equity omitted entirely -> falls back to the residual-share screen, clearly
+  // labeled as a weaker form of the test.
+  const rNoEquity = engine.incomeApproach({ financials: baseFinancials, shareholder }, 60000, cfg);
+  check('method = residual-share screen when equity is absent', rNoEquity.method, 'residual-share screen');
+  checkTrue('narrative discloses the weaker-form fallback', rNoEquity.narrative.includes('weaker form'));
+  check('residual-share screen verdict plausible (56.9% share)', rNoEquity.verdict, 'plausible');
+}
+
 // ============================================================ Integration
 // Run against the REAL generated data file: internal consistency only.
 console.log('Integration: real May-release OEWS data');
