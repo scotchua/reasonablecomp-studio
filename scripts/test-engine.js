@@ -634,6 +634,58 @@ console.log('Phase 3: return on equity vs. residual-share screen');
   check('residual-share screen verdict plausible (56.9% share)', rNoEquity.verdict, 'plausible');
 }
 
+// ============================================================ Phase 4a
+// Data loader (js/data/loader.js), tested purely against in-memory fixtures --
+// the real generated oews-core.js + per-state files don't exist until Phase 4b's
+// --repack runs. Node has no <script> tag injection, so under Node an
+// unregistered fips must report a clear error rather than hang; register() is
+// exercised directly, exactly as a real state part file would invoke it via
+// window.RCT_DATA_REGISTER on load.
+console.log('Phase 4a: data loader (fixture-based; real generated files land in Phase 4b)');
+{
+  function freshLoader() {
+    const loaderPath = path.join(__dirname, '..', 'js', 'data', 'loader.js');
+    delete require.cache[require.resolve(loaderPath)];
+    return require(loaderPath);
+  }
+
+  // National and any fips already marked loaded resolve synchronously.
+  global.window = {
+    RCT_DATA: {
+      areas: [['0000000', 'National', 'N', '00'], ['9999999', 'Fixture State', 'S', '99']],
+      states: { '99': 'js/data/oews/state-99.js' },
+      wages: {}, topcode: {},
+    },
+  };
+  let loader = freshLoader();
+  let calledWith;
+  loader.ensure('0000000', (err) => { calledWith = err; });
+  checkTrue('national area resolves synchronously with no error', calledWith === undefined);
+
+  // An unregistered state fips, under Node (no DOM), cannot inject a <script>
+  // tag -- ensure() must report a clear error rather than hang or crash.
+  calledWith = 'unset';
+  loader.ensure('9999999', (err) => { calledWith = err; });
+  checkTrue('unregistered fips under Node reports a clear error (no <script> injection possible)', calledWith instanceof Error);
+
+  // register() -- exactly as a state part file's own window.RCT_DATA_REGISTER(...)
+  // call would -- merges wages/topcode into RCT_DATA and marks the fips loaded.
+  loader.register('99', { wages: { '9999999': { '132011': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] } }, topcode: {} });
+  checkTrue('register() merges the state wage row into RCT_DATA.wages', !!global.window.RCT_DATA.wages['9999999']);
+  calledWith = 'unset';
+  loader.ensure('9999999', (err) => { calledWith = err; });
+  checkTrue('a registered fips now resolves synchronously with no error', calledWith === undefined);
+
+  // Backward compatibility: the OLD single-file bundle (no `states` manifest at
+  // all) must resolve EVERY area synchronously, since all wages are already in
+  // memory in that shape.
+  global.window = { RCT_DATA: { areas: [['1700000', 'Texas', 'S', '48']], wages: { '1700000': {} }, topcode: {} } }; // no `states` key
+  loader = freshLoader();
+  calledWith = 'unset';
+  loader.ensure('1700000', (err) => { calledWith = err; });
+  checkTrue('legacy single-file bundle (no states manifest) resolves synchronously', calledWith === undefined);
+}
+
 // ============================================================ Integration
 // Run against the REAL generated data file: internal consistency only.
 console.log('Integration: real May-release OEWS data');
