@@ -80,7 +80,7 @@
   // annual-only figures are additionally never scaled above 1.0x full-time,
   // because salaried comparables at a given percentile already reflect long
   // weeks (see 1.5.3).
-  function annualAtPercentile(lookup, percentile, effHours, weeksWorked, cfg) {
+  function annualAtPercentile(lookup, percentile, effHours, weeksWorked, cfg, trending) {
     var row = lookup.row;
     var ft = cfg.fullTimeHoursPerWeek;
     var hSlot = H_SLOT[percentile], aSlot = A_SLOT[percentile];
@@ -98,6 +98,14 @@
     } else {
       return null; // this percentile suppressed
     }
+    // ECI wage trending (4.4) — only disclosed in the basis when a real
+    // (non-1) factor was applied; disabled/unavailable trending is silent
+    // here (its own staleness note is surfaced separately, once per analysis).
+    if (trending && trending.factor !== 1) {
+      value *= trending.factor;
+      basis += ' × ECI trend ' + trending.factor.toFixed(4) + ' (May ' + trending.vintageQuarter.slice(0, 4) + ' → mid-' + trending.targetQuarter.slice(0, 4) + ')' +
+        (trending.extrapolated ? ', extrapolated beyond published ECI' : '');
+    }
     return { value: value, percentile: percentile, basis: basis, topcoded: topcoded, annualScaleCapped: annualScaleCapped };
   }
 
@@ -105,7 +113,7 @@
   // percentile when BLS suppressed the requested one — lower percentiles first
   // (the conservative direction), then higher. The percentile actually used is
   // recorded on the result so the memo never claims a percentile it didn't use.
-  function availableAt(lookup, percentile, effHours, weeksWorked, cfg) {
+  function availableAt(lookup, percentile, effHours, weeksWorked, cfg, trending) {
     var start = PCTS.indexOf(percentile);
     var order = [percentile];
     for (var d = 1; d < PCTS.length; d++) {
@@ -113,7 +121,7 @@
       if (start + d < PCTS.length) order.push(PCTS[start + d]);
     }
     for (var i = 0; i < order.length; i++) {
-      var r = annualAtPercentile(lookup, order[i], effHours, weeksWorked, cfg);
+      var r = annualAtPercentile(lookup, order[i], effHours, weeksWorked, cfg, trending);
       if (r) { r.substituted = order[i] !== percentile; r.requestedPercentile = percentile; return r; }
     }
     return null;
@@ -214,22 +222,71 @@
   // full (unshared) wage rate -- not multiplied by the component's % of time,
   // since it corroborates the occupation's market rate, not this shareholder's
   // partial allocation to it.
-  function industryComparable(data, sectorCode, soc, percentile, effHours, weeksWorked, cfg) {
+  function industryComparable(data, sectorCode, soc, percentile, effHours, weeksWorked, cfg, trending) {
     var ind = data.industry;
     if (!ind || !ind.wages[sectorCode] || !ind.wages[sectorCode][soc]) return null;
     var sectorTitle = sectorCode;
     (ind.sectors || []).forEach(function (s) { if (s[0] === sectorCode) sectorTitle = s[1]; });
     var lk = { row: ind.wages[sectorCode][soc], topcodeMask: (ind.topcode && ind.topcode[sectorCode] && ind.topcode[sectorCode][soc]) || 0 };
-    var r = availableAt(lk, percentile, effHours, weeksWorked, cfg);
+    var r = availableAt(lk, percentile, effHours, weeksWorked, cfg, trending);
     if (!r) return null;
     return { code: sectorCode, name: sectorTitle, mid: r.value, percentile: r.percentile, basis: r.basis };
+  }
+
+  // ------------------------------------------------------------- ECI trending
+
+  // Trends OEWS wages from their May <releaseYear> survey reference date to
+  // the tax year's mid-year, using the BLS Employment Cost Index (wages &
+  // salaries, private industry, all industries/occupations). `data.eci` is
+  // optional -- { series, values: {"2015Q1": <n>, ...} }. When ECI data is
+  // unavailable, disabled, or the tax year is unknown, factor is 1; if the
+  // tax year and OEWS vintage genuinely differ by a year or more, a staleness
+  // note is returned instead (surfaced once, via costApproach.notes).
+  function computeTrendingFactor(data, releaseYear, taxYear, cfg) {
+    var vintageQuarter = releaseYear + 'Q2';
+    var haveTaxYear = taxYear !== null && taxYear !== undefined && isFinite(taxYear);
+    var targetQuarter = haveTaxYear ? (taxYear + 'Q2') : vintageQuarter;
+    var res = { factor: 1, vintageQuarter: vintageQuarter, targetQuarter: targetQuarter, extrapolated: false, series: (data.eci && data.eci.series) || null, note: null };
+    var staleMonths = haveTaxYear ? Math.round(Math.abs(taxYear - releaseYear) * 12) : 0;
+    var maybeStalenessNote = function (reason) {
+      if (haveTaxYear && Math.abs(taxYear - releaseYear) >= 1) {
+        res.note = 'Wages were not trended from the May ' + releaseYear + ' survey reference to tax year ' + taxYear +
+          ' (' + reason + ') — the figures are ' + staleMonths + ' months stale in a rising-wage environment.';
+      }
+    };
+    var trendingOn = !!(cfg.wageTrending && cfg.wageTrending.enabled);
+    var eci = (trendingOn && data.eci && data.eci.values) ? data.eci.values : null;
+    if (!eci || !haveTaxYear) { maybeStalenessNote('ECI data unavailable'); return res; }
+    if (eci[vintageQuarter] == null) { maybeStalenessNote('no ECI value published for ' + vintageQuarter); return res; }
+    if (eci[targetQuarter] != null) {
+      res.factor = eci[targetQuarter] / eci[vintageQuarter];
+      return res;
+    }
+    // Target beyond the last published quarter: extrapolate using the
+    // trailing year-over-year ratio, raised to the fractional-year power
+    // between the last published quarter and the target.
+    var quarterKeys = Object.keys(eci).sort(); // "YYYYQn" sorts lexicographically = chronologically
+    var lastQuarter = quarterKeys[quarterKeys.length - 1];
+    var parseQ = function (q) { return { y: parseInt(q.slice(0, 4), 10), q: parseInt(q.slice(5), 10) }; };
+    var quartersBetween = function (a, b) { var pa = parseQ(a), pb = parseQ(b); return (pb.y - pa.y) * 4 + (pb.q - pa.q); };
+    var lastParsed = parseQ(lastQuarter);
+    var priorYearQuarter = (lastParsed.y - 1) + 'Q' + lastParsed.q;
+    if (eci[priorYearQuarter] == null || quartersBetween(vintageQuarter, targetQuarter) <= 0) {
+      maybeStalenessNote('ECI data does not extend far enough to trend or extrapolate');
+      return res;
+    }
+    var yoy = eci[lastQuarter] / eci[priorYearQuarter];
+    var extraQuarters = quartersBetween(lastQuarter, targetQuarter);
+    res.factor = (eci[lastQuarter] / eci[vintageQuarter]) * Math.pow(yoy, extraQuarters / 4);
+    res.extrapolated = true;
+    return res;
   }
 
   // ------------------------------------------------------------- cost approach
 
   // components: [{ roleTitle, soc, pctTime (0-100), percentileOverride?, overrideReason?,
   //                licenseApplies?, yearsExperienceOverride? }]
-  function costApproach(input, data, cfg) {
+  function costApproach(input, data, cfg, trending) {
     var sh = input.shareholder;
     var hc = resolveHours(sh, cfg);
     var def = defaultPercentile(sh, cfg);
@@ -300,7 +357,7 @@
 
       ['low', 'mid', 'high'].forEach(function (band, bi) {
         var p = pctStep(comp.percentile, bi - 1);
-        var r = availableAt(lk, p, hc.effHours, hc.weeksWorked, cfg);
+        var r = availableAt(lk, p, hc.effHours, hc.weeksWorked, cfg, trending);
         if (r) {
           comp[band] = r.value * share;
           comp[band + 'Detail'] = { percentile: r.percentile, basis: r.basis, topcoded: r.topcoded, substituted: r.substituted };
@@ -316,7 +373,7 @@
       // National industry-sector comparable (corroboration only; 4.3) —
       // never affects the totals above.
       if (rc.industryCode) {
-        var ic = industryComparable(data, rc.industryCode, rc.soc, comp.percentile, hc.effHours, hc.weeksWorked, cfg);
+        var ic = industryComparable(data, rc.industryCode, rc.soc, comp.percentile, hc.effHours, hc.weeksWorked, cfg, trending);
         if (ic) {
           comp.industryComparable = ic;
           out.notes.push('National ' + ic.name + ' industry comparable for SOC ' + socDisplay(rc.soc) + ' at the ' + ic.percentile +
@@ -333,7 +390,7 @@
 
   // ----------------------------------------------------------- market approach
 
-  function marketApproach(input, data, cfg, defTier) {
+  function marketApproach(input, data, cfg, defTier, trending) {
     var rcs = input.roleComponents.slice().sort(function (a, b) { return (b.pctTime || 0) - (a.pctTime || 0); });
     var top = rcs[0];
     var res = { applicable: false };
@@ -357,7 +414,7 @@
     res.pctTime = top.pctTime; res.percentile = pct;
     res.areaUsedName = lk.areaUsedName; res.fellBack = lk.fellBack;
     ['low', 'mid', 'high'].forEach(function (band, bi) {
-      var r = availableAt(lk, pctStep(pct, bi - 1), hc.effHours, hc.weeksWorked, cfg);
+      var r = availableAt(lk, pctStep(pct, bi - 1), hc.effHours, hc.weeksWorked, cfg, trending);
       if (r) { res[band] = r.value; res[band + 'Detail'] = { percentile: r.percentile, basis: r.basis, topcoded: r.topcoded, substituted: r.substituted }; if (r.topcoded) res.topcoded = true; }
     });
     return res;
@@ -656,9 +713,12 @@
     if (!input.roleComponents || !input.roleComponents.length) {
       throw new Error('At least one role component is required.');
     }
+    var taxYearForTrending = num((input.shareholder || {}).taxYear);
+    var trending = computeTrendingFactor(data, data.releaseYear, taxYearForTrending, cfg);
     var defTier = defaultPercentile(input.shareholder, cfg);
-    var cost = costApproach(input, data, cfg);
-    var market = marketApproach(input, data, cfg, defTier);
+    var cost = costApproach(input, data, cfg, trending);
+    if (trending.note) cost.notes.push(trending.note);
+    var market = marketApproach(input, data, cfg, defTier, trending);
     // Test the shareholder's actual planned wages (not the tool's own recommendation —
     // that would be circular). Falls back to the recommended mid only when no planned
     // wage was entered, so the income approach always has a number to test.
@@ -686,6 +746,7 @@
       range: rec.range,
       reconciliation: rec.narrative,
       flags: flags,
+      trending: trending,
       generatedAt: null, // stamped by the caller at save time
     };
   }
@@ -693,6 +754,7 @@
   return {
     analyze: analyze,
     num: num,
+    computeTrendingFactor: computeTrendingFactor,
     employerPayrollCost: employerPayrollCost,
     industryComparable: industryComparable,
     lookupWage: lookupWage,

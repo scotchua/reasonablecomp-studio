@@ -8,8 +8,14 @@
  * the full area/occupation index, and a per-state file manifest) plus one
  * js/data/oews/state-<fips>.js file per state/territory, loaded on demand by
  * js/data/loader.js, plus js/data/oews-industry.js (national NAICS-sector wage
- * comparables, shown in the app for corroboration only). No server, no build
- * step — plain <script> tags.
+ * comparables, shown in the app for corroboration only) and js/data/eci-data.js
+ * (BLS Employment Cost Index, used to trend OEWS wages forward from their May
+ * survey date to the tax year). No server, no build step — plain <script> tags.
+ *
+ * The industry and ECI files are each optional enhancements: a failure
+ * downloading/parsing either one is logged as a WARNING and that file is
+ * simply not (re)written -- it does NOT abort the core OEWS refresh, and the
+ * app treats both files as optional wherever it uses them.
  *
  * NOTE: a full network refresh requires real internet access to
  * download.bls.gov and is NOT possible from a sandboxed/cloud dev
@@ -64,6 +70,7 @@ const OEWS_DIR = path.join(DATA_DIR, 'oews');
 const CORE_OUT = path.join(DATA_DIR, 'oews-core.js');
 const LEGACY_OUT = path.join(DATA_DIR, 'oews-data.js');
 const INDUSTRY_OUT = path.join(DATA_DIR, 'oews-industry.js');
+const ECI_OUT = path.join(DATA_DIR, 'eci-data.js');
 
 // display_level value BLS's oe.industry file uses for NAICS SECTOR-level rows
 // (as distinct from '0' cross-industry total, or deeper 3-/4-/5-/6-digit NAICS
@@ -74,11 +81,22 @@ const INDUSTRY_OUT = path.join(DATA_DIR, 'oews-industry.js');
 // be corrected against the real file.
 const INDUSTRY_SECTOR_DISPLAY_LEVEL = '1';
 
-function download(file, destDir) {
+// ---- ECI wage trending (4.4) --------------------------------------------
+const ECI_BASE_URL = 'https://download.bls.gov/pub/time.series/ci/';
+const ECI_FILES = ['ci.series', 'ci.data.1.AllData'];
+// ECI: wages and salaries, private industry workers, all industries and
+// occupations, index, not seasonally adjusted. VERIFIED against the live
+// ci.series file at run time (see readEciSeries()) rather than trusted
+// blindly -- if this series id isn't found, the refresh prints every
+// candidate CIU202* series id and skips ECI trending for this run (it does
+// NOT abort the OEWS refresh, which is the core deliverable).
+const ECI_SERIES_ID = 'CIU2020000000000I';
+
+function download(baseUrl, file, destDir) {
   const dest = path.join(destDir, file);
   return new Promise((resolve, reject) => {
     const out = fs.createWriteStream(dest);
-    https.get(BASE_URL + file, { headers: { 'User-Agent': USER_AGENT } }, (res) => {
+    https.get(baseUrl + file, { headers: { 'User-Agent': USER_AGENT } }, (res) => {
       if (res.statusCode !== 200) {
         reject(new Error(`${file}: HTTP ${res.statusCode} — BLS may be blocking the request; check the User-Agent contact info.`));
         res.resume();
@@ -139,6 +157,81 @@ function readIndustrySectors(dir) {
   sectorRows.slice(0, 25).forEach((r) => console.log(`  kept sector: ${r.industry_code} ${r.industry_name}`));
   if (sectorRows.length > 25) console.log(`  ...and ${sectorRows.length - 25} more.`);
   return sectorRows;
+}
+
+// ---- ECI wage trending data (4.4) ---------------------------------------
+// Confirms ECI_SERIES_ID actually exists in the live ci.series file rather
+// than trusting it blindly. Throws (caught by the caller, non-fatal to the
+// overall refresh) with every CIU202*-prefixed candidate if it's not found.
+function readEciSeries(dir) {
+  const seriesPath = path.join(dir, 'ci.series');
+  if (!fs.existsSync(seriesPath)) {
+    throw new Error(`ci.series not found in ${dir} -- ECI wage trending requires this file.`);
+  }
+  const rows = readTsv(seriesPath);
+  const match = rows.find((r) => r.series_id === ECI_SERIES_ID);
+  if (!match) {
+    const candidates = rows.filter((r) => r.series_id.indexOf('CIU202') === 0).map((r) => `${r.series_id}  ${r.series_title || ''}`);
+    throw new Error(`ECI series '${ECI_SERIES_ID}' not found in ci.series. Candidates starting with CIU202:\n  ${candidates.slice(0, 40).join('\n  ')}\nCorrect ECI_SERIES_ID at the top of this file to match the real file before proceeding.`);
+  }
+  console.log(`ECI series verified: ${ECI_SERIES_ID} — ${match.series_title || '(no title column in this file)'}`);
+  return match;
+}
+
+// Extracts quarterly index values (2015Q1 forward) for ECI_SERIES_ID from
+// ci.data.1.AllData. BLS's standard quarterly period codes are 'Q01'-'Q04'
+// (an annual-average row, if present, uses a different code and is excluded);
+// this is VERIFIED against the rows actually present rather than trusted --
+// if nothing matches that pattern, it throws with the period codes actually
+// found so the pattern can be corrected against the real schema.
+function readEciValues(dir) {
+  const dataPath = path.join(dir, 'ci.data.1.AllData');
+  if (!fs.existsSync(dataPath)) {
+    throw new Error(`ci.data.1.AllData not found in ${dir} -- ECI wage trending requires this file.`);
+  }
+  const rows = readTsv(dataPath);
+  const seriesRows = rows.filter((r) => r.series_id === ECI_SERIES_ID);
+  if (!seriesRows.length) {
+    throw new Error(`No rows found for series '${ECI_SERIES_ID}' in ci.data.1.AllData.`);
+  }
+  const values = {};
+  let matchedAny = false;
+  seriesRows.forEach((r) => {
+    const m = /^Q0([1-4])$/.exec(r.period || '');
+    if (!m) return;
+    matchedAny = true;
+    const year = parseInt(r.year, 10);
+    if (year < 2015) return; // only need 2015 forward
+    const value = parseFloat(r.value);
+    if (!isFinite(value)) return;
+    values[`${year}Q${m[1]}`] = value;
+  });
+  if (!matchedAny) {
+    const periodsSeen = Array.from(new Set(seriesRows.map((r) => r.period))).join(', ');
+    throw new Error(`No quarterly ('Q01'-'Q04') rows recognized for series '${ECI_SERIES_ID}' (period codes found: ${periodsSeen}). Update the period-code pattern in readEciValues() to match the real BLS schema before proceeding.`);
+  }
+  console.log(`ECI quarterly values extracted: ${Object.keys(values).length} (2015Q1 forward)`);
+  return values;
+}
+
+// Builds js/data/eci-data.js from ci.series + ci.data.1.AllData in `dir`. A
+// failure here does NOT abort the OEWS refresh -- ECI trending is an
+// enhancement layered on the core wage dataset, not a blocker. Called after
+// the main OEWS build() so the primary deliverable always completes first.
+function buildEci(dir) {
+  try {
+    const series = readEciSeries(dir);
+    const values = readEciValues(dir);
+    const out = { series: ECI_SERIES_ID, title: series.series_title || null, values, generatedAt: new Date().toISOString() };
+    const js = `// GENERATED by scripts/refresh-oews.js — do not edit by hand.\n` +
+      `// BLS Employment Cost Index (${ECI_SERIES_ID}), quarterly, 2015Q1 forward.\n` +
+      `window.RCT_ECI = ${JSON.stringify(out)};\n`;
+    fs.writeFileSync(ECI_OUT, js);
+    console.log(`ECI trending data written: ${ECI_OUT}`);
+  } catch (e) {
+    console.error(`WARNING: ECI wage trending data will NOT be generated this run: ${e.message}`);
+    console.error('Wage trending falls back to a disclosed staleness note until this is fixed -- see js/engine/comp-engine.js computeTrendingFactor().');
+  }
 }
 
 // ---- shared emission --------------------------------------------------
@@ -223,7 +316,14 @@ async function build(dir) {
   console.log(`Occupations kept: ${keptOccs.length} of ${occRows.length}`);
 
   // ---- industry sectors (4.3, national comparables only) -----------------
-  const sectorRows = readIndustrySectors(dir);
+  // A failure here does NOT abort the OEWS refresh -- industry comparables
+  // are an enhancement layered on the core wage dataset, not a blocker.
+  let sectorRows = [];
+  try {
+    sectorRows = readIndustrySectors(dir);
+  } catch (e) {
+    console.error(`WARNING: industry-sector comparables will NOT be generated this run: ${e.message}`);
+  }
   const sectorCodeSet = new Set(sectorRows.map((r) => r.industry_code));
 
   // ---- stream the data file ---------------------------------------------
@@ -313,16 +413,20 @@ async function build(dir) {
   console.log(`Core file size: ${coreMb} MB`);
 
   // ---- industry-sector comparables (4.3) ----------------------------------
-  const industryOut = {
-    sectors: sectorRows.map((r) => [r.industry_code, r.industry_name]),
-    wages: industryWages,
-    topcode: industryTopcode,
-  };
-  const industryJs = `// GENERATED by scripts/refresh-oews.js — do not edit by hand.\n` +
-    `// BLS OEWS ${releaseLabel} release. National NAICS-sector wage comparables (corroboration only).\n` +
-    `window.RCT_INDUSTRY = ${JSON.stringify(industryOut)};\n`;
-  fs.writeFileSync(INDUSTRY_OUT, industryJs);
-  console.log(`Industry comparables written: ${INDUSTRY_OUT} (${sectorRows.length} sectors)`);
+  if (sectorRows.length) {
+    const industryOut = {
+      sectors: sectorRows.map((r) => [r.industry_code, r.industry_name]),
+      wages: industryWages,
+      topcode: industryTopcode,
+    };
+    const industryJs = `// GENERATED by scripts/refresh-oews.js — do not edit by hand.\n` +
+      `// BLS OEWS ${releaseLabel} release. National NAICS-sector wage comparables (corroboration only).\n` +
+      `window.RCT_INDUSTRY = ${JSON.stringify(industryOut)};\n`;
+    fs.writeFileSync(INDUSTRY_OUT, industryJs);
+    console.log(`Industry comparables written: ${INDUSTRY_OUT} (${sectorRows.length} sectors)`);
+  } else {
+    console.log('Industry comparables NOT written this run (see WARNING above, if any) -- js/data/oews-industry.js left untouched.');
+  }
 
   // ---- self-audit ---------------------------------------------------------
   // Only a full nationwide refresh (no --states) is expected to clear these;
@@ -429,18 +533,30 @@ async function main() {
   let dir;
   if (localIdx !== -1) {
     dir = process.argv[localIdx + 1];
-    if (!dir || !fs.existsSync(dir)) throw new Error('--local <dir> must point to a folder holding the oe.* flat files');
+    if (!dir || !fs.existsSync(dir)) throw new Error('--local <dir> must point to a folder holding the oe.* (and, for ECI trending, ci.*) flat files');
     console.log(`Using local flat files in ${dir}`);
   } else {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oews-'));
     console.log(`Downloading OEWS flat files to ${dir} (the data file is ~330 MB; this can take a few minutes)…`);
     for (const f of FILES) {
       process.stdout.write(`  ${f} … `);
-      await download(f, dir);
+      await download(BASE_URL, f, dir);
       console.log('done');
+    }
+    console.log('Downloading ECI (wage trending) flat files…');
+    try {
+      for (const f of ECI_FILES) {
+        process.stdout.write(`  ${f} … `);
+        await download(ECI_BASE_URL, f, dir);
+        console.log('done');
+      }
+    } catch (e) {
+      console.error(`WARNING: could not download ECI flat files: ${e.message}`);
+      console.error('The OEWS refresh will continue; ECI wage trending will not be generated this run.');
     }
   }
   await build(dir);
+  buildEci(dir);
 }
 
 main().catch((e) => { console.error('REFRESH FAILED:', e.message); process.exit(1); });

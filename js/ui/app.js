@@ -216,6 +216,11 @@
       'Wage data: BLS OEWS ' + DATA.release + ' release (generated ' + new Date(DATA.generatedAt).toLocaleDateString() + '). ' +
       'Refresh annually each May: node scripts/refresh-oews.js',
     ]));
+    if (!DATA.eci || !DATA.industry) {
+      root.appendChild(el('p', { class: 'muted' }, [
+        'Industry/ECI data not yet generated — run scripts/refresh-oews.js for full coverage.',
+      ]));
+    }
   }
 
   function addClient() {
@@ -638,7 +643,10 @@
   function renderAnalysis(c, sh, year, a) {
     var yr = yearRec(sh, year);
     var wrap = el('div', {});
-    wrap.appendChild(el('h2', {}, ['Analysis — reconciled range', el('span', { class: 'muted', style: 'font-weight:400;font-size:13px' }, ['  OEWS ' + a.oewsRelease + ' · run ' + new Date(a.generatedAt).toLocaleString()])]));
+    var trendSuffix = (a.trending && a.trending.factor !== 1)
+      ? ' · trended ×' + a.trending.factor.toFixed(4) + ' to TY ' + a.trending.targetQuarter.slice(0, 4) + (a.trending.extrapolated ? ' (extrapolated)' : '')
+      : '';
+    wrap.appendChild(el('h2', {}, ['Analysis — reconciled range', el('span', { class: 'muted', style: 'font-weight:400;font-size:13px' }, ['  OEWS ' + a.oewsRelease + trendSuffix + ' · run ' + new Date(a.generatedAt).toLocaleString()])]));
 
     var banner = el('div', { class: 'range-banner' });
     [['low', 'Low'], ['mid', 'Recommended'], ['high', 'High']].forEach(function (b) {
@@ -810,11 +818,13 @@
 
   // ------------------------------------------------------------------ boot
 
-  // National industry-sector wage comparables (4.3) are an optional,
-  // separately-generated data file -- only produced by a full network refresh
-  // (node scripts/refresh-oews.js), so it may not exist yet. Treated as fully
-  // optional everywhere it's consulted.
+  // National industry-sector wage comparables (4.3) and ECI wage trending
+  // (4.4) are optional, separately-generated data files -- both are only
+  // produced by a full network refresh (node scripts/refresh-oews.js), so
+  // either may not exist yet. Both are treated as fully optional everywhere
+  // they're consulted.
   DATA.industry = window.RCT_INDUSTRY || null;
+  DATA.eci = window.RCT_ECI || null;
 
   document.getElementById('vintage').textContent = 'BLS OEWS ' + DATA.release + ' release';
   render();

@@ -731,6 +731,79 @@ console.log('Phase 4c: national industry-sector comparable (corroboration only)'
   checkTrue('no industryComparable when industryCode is unset', !withoutIndustry.costApproach.components[0].industryComparable);
 }
 
+// ============================================================ Phase 4d
+// ECI wage trending. FIX.releaseYear = 2025, so vintage quarter is always
+// "2025Q2". Every scenario above has no `eci` fixture data (or a taxYear equal
+// to the release year), so their hand math is untouched -- confirmed by the
+// "no trending" case below and by every prior scenario still being green.
+console.log('Phase 4d: ECI wage trending');
+{
+  // Non-extrapolated: target quarter (2026Q2) is directly published.
+  // factor = 104/100 = 1.04. Single 100%-time component, 40 hrs/wk, 52 wks,
+  // 75th percentile (10 yrs exp): $40/hr x 40 x 52 = 83,200 untrended ->
+  // 83,200 x 1.04 = 86,528 trended.
+  const fixWithEci = Object.assign({}, FIX, {
+    eci: { series: 'CIU2020000000000I', values: { '2025Q2': 100, '2026Q2': 104 } },
+  });
+  const trended = engine.analyze({
+    client,
+    shareholder: { name: 'S', yearsExperience: 10, licenses: '', hoursPerWeek: 40, taxYear: '2026' },
+    roleComponents: [{ roleTitle: 'Accountant', soc: '132011', pctTime: 100 }],
+    financials: {},
+    compHistory: [],
+  }, fixWithEci, cfg);
+  check('trending factor = 1.04 (2026Q2/2025Q2 = 104/100)', trended.trending.factor, 1.04, 0.0001);
+  checkTrue('not extrapolated (target quarter directly published)', !trended.trending.extrapolated);
+  check('mid = 86,528 (83,200 untrended x 1.04)', trended.costApproach.mid, 86528);
+  checkTrue('basis discloses the ECI trend factor', trended.costApproach.components[0].midDetail.basis.includes('ECI trend 1.0400'));
+
+  // Extrapolated: target tax year 2027 is 4 quarters past the last published
+  // quarter (2026Q2). yoy = eci[2026Q2]/eci[2025Q2] = 104/100 = 1.04 (the
+  // prior-year quarter of 2026Q2 is 2025Q2, which IS published). factor =
+  // (104/100) x 1.04^(4/4) = 1.04 x 1.04 = 1.0816.
+  const fixWithEciSeries = Object.assign({}, FIX, {
+    eci: {
+      series: 'CIU2020000000000I',
+      values: { '2025Q2': 100, '2025Q3': 101, '2025Q4': 102, '2026Q1': 103, '2026Q2': 104 },
+    },
+  });
+  const extrapolated = engine.analyze({
+    client,
+    shareholder: { name: 'T', yearsExperience: 10, licenses: '', hoursPerWeek: 40, taxYear: '2027' },
+    roleComponents: [{ roleTitle: 'Accountant', soc: '132011', pctTime: 100 }],
+    financials: {},
+    compHistory: [],
+  }, fixWithEciSeries, cfg);
+  check('extrapolated trending factor = 1.0816', extrapolated.trending.factor, 1.0816, 0.0001);
+  checkTrue('extrapolated flag set (target beyond the last published quarter)', extrapolated.trending.extrapolated);
+  checkTrue('basis discloses the extrapolation caveat', extrapolated.costApproach.components[0].midDetail.basis.includes('extrapolated beyond published ECI'));
+
+  // No ECI data at all, tax year 3 years past the vintage -> factor stays 1,
+  // and a staleness note is disclosed (via costApproach.notes) instead.
+  const stale = engine.analyze({
+    client,
+    shareholder: { name: 'U', yearsExperience: 10, licenses: '', hoursPerWeek: 40, taxYear: '2028' },
+    roleComponents: [{ roleTitle: 'Accountant', soc: '132011', pctTime: 100 }],
+    financials: {},
+    compHistory: [],
+  }, FIX, cfg); // FIX has no `eci` key at all
+  check('no ECI data -> factor stays 1', stale.trending.factor, 1);
+  checkTrue('staleness note discloses the mismatch when ECI is unavailable', stale.costApproach.notes.some(n => n.includes('not trended') && n.includes('36 months stale')));
+
+  // No taxYear provided at all (most scenarios above) -> factor 1, NO
+  // staleness note (absence of a tax year is not the same as a known,
+  // disclosed mismatch -- mirrors the employerPayrollCost clampedYear rule).
+  const noYear = engine.analyze({
+    client,
+    shareholder: { name: 'V', yearsExperience: 10, licenses: '', hoursPerWeek: 40 },
+    roleComponents: [{ roleTitle: 'Accountant', soc: '132011', pctTime: 100 }],
+    financials: {},
+    compHistory: [],
+  }, FIX, cfg);
+  check('no taxYear provided -> factor stays 1', noYear.trending.factor, 1);
+  checkTrue('no staleness note when the tax year was simply never entered', !noYear.costApproach.notes.some(n => n.includes('not trended')));
+}
+
 // ============================================================ Integration
 // Run against the REAL generated data file: internal consistency only.
 console.log('Integration: real May-release OEWS data (core + per-state files via the loader)');

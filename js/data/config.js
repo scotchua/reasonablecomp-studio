@@ -75,6 +75,13 @@
     // itself a distinct verdict tier.
     investorReturn: { required: 0.10, strong: 0.20 },
 
+    // ---- ECI wage trending (4.4) ----
+    // Trends OEWS wages from their May survey reference date to the tax
+    // year's mid-year using the BLS Employment Cost Index. Disabling this
+    // reverts to a flat factor of 1 (no trending) and surfaces a staleness
+    // note whenever the tax year and OEWS vintage genuinely differ.
+    wageTrending: { enabled: true },
+
     // ---- Red-flag thresholds ----
     flags: {
       // Distributions-to-salary ratio, current year and trailing 3-year aggregate.
