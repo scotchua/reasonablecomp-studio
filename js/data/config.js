@@ -187,6 +187,16 @@
       },
     ],
 
+    // ---- OEWS data limitations (5.2) — rendered verbatim in every memo ----
+    oewsLimitations:
+      'OEWS wage estimates measure the straight-time wages of employees of sampled establishments. They include base ' +
+      'pay, commissions, production bonuses, and tips, but exclude overtime premiums, nonproduction bonuses (such as ' +
+      'year-end or profit-sharing bonuses), equity compensation, and the employer cost of benefits. They reflect ' +
+      'employees rather than owner-operators, and cross-industry estimates average establishments of all industries ' +
+      'and sizes. These limitations tend to make OEWS a conservative (low) measure of the total market compensation ' +
+      'of an experienced owner-manager; where a component uses a cross-industry figure, the industry-sector ' +
+      'comparable shown, if any, provides corroboration.',
+
     disclaimer:
       'This analysis applies IRS-published reasonable compensation methodology (Reasonable Compensation ' +
       'Job Aid for IRS Valuation Professionals) and BLS Occupational Employment and Wage Statistics (OEWS) ' +

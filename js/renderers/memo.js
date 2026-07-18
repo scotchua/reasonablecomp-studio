@@ -37,6 +37,27 @@
       '<div class="c-range"><span>' + usd(a.range.low) + '<em>low</em></span><span class="c-mid">' + usd(a.range.mid) + '<em>recommended</em></span><span>' + usd(a.range.high) + '<em>high</em></span></div>' +
       '<p class="c-note">Determined under Treas. Reg. §1.162-7(b)(3): the amount that would ordinarily be paid for like services by like enterprises under like circumstances, using the three-approach methodology of the IRS Reasonable Compensation Job Aid for IRS Valuation Professionals. No percentage-of-profit formula was used at any step.</p></div>');
 
+    // ---- planned wages vs. this analysis (5.1) — the headline finding a
+    // reader should never have to infer from a table ----
+    var pwRaw = (yr.financials || {}).totalOfficerWages;
+    var pwNum = (pwRaw !== null && pwRaw !== undefined && pwRaw !== '' && isFinite(Number(pwRaw))) ? Number(pwRaw) : null;
+    html.push('<div class="wage-compare"><div class="c-label">Planned wages vs. this analysis</div>');
+    if (pwNum === null) {
+      html.push('<p>Planned officer wages were not provided; this memo prices the role but does not evaluate a planned wage.</p>');
+    } else if (pwNum < a.range.low) {
+      html.push('<p>Planned officer wages of <strong>' + usd(pwNum) + '</strong> are <strong>' + usd(a.range.low - pwNum) +
+        '</strong> below the reconciled range of ' + usd(a.range.low) + '–' + usd(a.range.high) + ' (recommended ' + usd(a.range.mid) +
+        '). See the BELOW_RANGE flag response in section 6.</p>');
+    } else if (pwNum > a.range.high) {
+      html.push('<p>Planned officer wages of <strong>' + usd(pwNum) + '</strong> are <strong>' + usd(pwNum - a.range.high) +
+        '</strong> above the reconciled range of ' + usd(a.range.low) + '–' + usd(a.range.high) + ' (recommended ' + usd(a.range.mid) +
+        '). See the ABOVE_RANGE note in section 6.</p>');
+    } else {
+      html.push('<p>Planned officer wages of <strong>' + usd(pwNum) + '</strong> are within the reconciled range of ' +
+        usd(a.range.low) + '–' + usd(a.range.high) + ' (recommended ' + usd(a.range.mid) + '). No adjustment is indicated.</p>');
+    }
+    html.push('</div>');
+
     // ---- 2. source of receipts ----
     var rev = yr.revenueSources || {};
     var revTotal = (Number(rev.shareholderServicesPct) || 0) + (Number(rev.employeeServicesPct) || 0) + (Number(rev.capitalEquipmentPct) || 0);
@@ -50,9 +71,23 @@
     html.push('<p><strong>Support and reasoning:</strong> ' + esc(rev.notes || 'Not documented.') + '</p>');
 
     // ---- 3. role breakdown ----
+    // Vintage/tax-year alignment (5.3): whether wages were trended forward to
+    // the tax year, or -- when trending wasn't possible -- the disclosed
+    // staleness note (a.trending.note), surfaced directly in this intro
+    // rather than left to the generic per-component notes list below.
+    var trendSentence = '';
+    if (a.trending) {
+      if (a.trending.factor !== 1) {
+        trendSentence = ' Wages were trended from the May ' + a.trending.vintageQuarter.slice(0, 4) + ' survey reference date to mid-' +
+          a.trending.targetQuarter.slice(0, 4) + ' using the BLS Employment Cost Index' + (a.trending.series ? ' (' + esc(a.trending.series) + ')' : '') +
+          ', factor ' + a.trending.factor.toFixed(4) + (a.trending.extrapolated ? ', extrapolated beyond published data' : '') + '.';
+      } else if (a.trending.note) {
+        trendSentence = ' ' + esc(a.trending.note);
+      }
+    }
     html.push('<h2>2 · Role composition and market pricing (Cost / Multiple Components approach)</h2>');
     html.push('<p>' + esc(sh.name) + ' devotes approximately <strong>' + esc(yr.hoursPerWeek) + ' hours per week</strong>' +
-      (yr.seasonality ? ' (' + esc(yr.seasonality) + ')' : '') + ' to the company. The role was decomposed into its component occupations, each priced against BLS OEWS ' + esc(a.oewsRelease) + ' data for the company’s principal work area (' + esc(m.areaName(m.client.areaCode)) + '), at the wage percentile supported by the shareholder’s experience and credentials.</p>');
+      (yr.seasonality ? ' (' + esc(yr.seasonality) + ')' : '') + ' to the company. The role was decomposed into its component occupations, each priced against BLS OEWS ' + esc(a.oewsRelease) + ' data for the company’s principal work area (' + esc(m.areaName(m.client.areaCode)) + '), at the wage percentile supported by the shareholder’s experience and credentials.' + trendSentence + '</p>');
     html.push('<table class="t"><tr><th>Role component</th><th>SOC code &amp; occupation</th><th>Wage data area</th><th>Percentile — basis</th><th class="num">% time</th><th class="num">Low</th><th class="num">Mid</th><th class="num">High</th></tr>');
     a.costApproach.components.forEach(function (cc) {
       html.push('<tr><td>' + esc(cc.roleTitle || m.occTitle(cc.soc)) + '</td><td>' + esc(cc.socDisplay) + ' ' + esc(m.occTitle(cc.soc)) + '</td>' +
@@ -79,9 +114,18 @@
     }
     html.push('<h2>4 · Income approach (independent investor test)</h2>');
     if (a.incomeApproach.applicable) {
-      html.push('<p>At the proposed compensation of ' + usd(a.incomeApproach.proposedSalary) + ', plus estimated employer payroll cost of ' + usd(a.incomeApproach.employerPayrollTax) + ', the company retains a residual return of <strong>' + usd(a.incomeApproach.residual) + '</strong>' +
-        (a.incomeApproach.residualShare != null ? ' (' + (a.incomeApproach.residualShare * 100).toFixed(1) + '% of net income before officer compensation)' : '') + '. ' + esc(a.incomeApproach.narrative) + '</p>');
-      html.push('<p class="fine">' + esc(a.incomeApproach.payrollTaxNote) + '</p>');
+      var ia = a.incomeApproach;
+      html.push('<p>Tested at <strong>' + usd(ia.proposedSalary) + '</strong> (' + esc(ia.salaryBasis) + '), plus estimated employer payroll cost of ' +
+        usd(ia.employerPayrollTax) + ', the company retains a residual return of <strong>' + usd(ia.residual) + '</strong>' +
+        (ia.residualShare != null ? ' (' + (ia.residualShare * 100).toFixed(1) + '% of net income before officer compensation)' : '') + '.</p>');
+      if (ia.method === 'return on equity') {
+        html.push('<p>Method: <strong>return on beginning shareholder equity</strong> (' + usd(ia.equity) + ' equity) — ' +
+          (ia.roe * 100).toFixed(1) + '% return, against a ' + Math.round(m.cfg.investorReturn.required * 100) + '% independent-investor benchmark.</p>');
+      } else {
+        html.push('<p>Method: <strong>residual-share screen</strong> (beginning shareholder equity not provided — a weaker form of the independent investor test).</p>');
+      }
+      html.push('<p>' + esc(ia.narrative) + '</p>');
+      html.push('<p class="fine">' + esc(ia.payrollTaxNote) + '</p>');
     } else {
       html.push('<p>' + esc(a.incomeApproach.reason || 'Not performed.') + '</p>');
     }
@@ -147,6 +191,7 @@
       html.push('<tr><td><strong>' + esc(source.publisher) + '</strong><br><span class="source-url">' + esc(source.title) + '<br>' + esc(source.url) + '</span></td><td>' + esc(source.use) + '</td></tr>');
     });
     html.push('</table>');
+    html.push('<h2>OEWS data limitations</h2><p class="fine">' + esc(m.cfg.oewsLimitations) + '</p>');
     html.push('<div class="fingerprint"><strong>Workpaper SHA-256 fingerprint</strong><code>' + esc(m.workpaperFingerprint) + '</code>' +
       '<span>Analysis snapshot: ' + esc(a.analysisFingerprint || 'legacy analysis - re-run to fingerprint') + '</span></div>');
     html.push('<div class="disclaimer">' + esc(m.cfg.disclaimer) + '</div>');
@@ -179,6 +224,7 @@
     '.c-range { display: flex; gap: 28pt; margin: 6pt 0; } .c-range span { font-size: 16pt; font-weight: bold; } .c-range .c-mid { font-size: 20pt; }',
     '.c-range em { display: block; font-size: 8.5pt; font-style: normal; font-weight: normal; color: #555; text-transform: uppercase; letter-spacing: .08em; }',
     '.c-note { font-size: 9.5pt; color: #333; margin: 4pt 0 0; }',
+    '.wage-compare { border: 1pt solid #9aa7b3; background: #f7f9fb; padding: 8pt 12pt; margin: 0 0 14pt; } .wage-compare p { margin: 4pt 0 0; font-size: 10pt; }',
     'table.t { width: 100%; border-collapse: collapse; font-size: 9.5pt; margin: 6pt 0; }',
     'table.t th, table.t td { border: 0.5pt solid #999; padding: 4pt 6pt; text-align: left; vertical-align: top; }',
     'table.t th { background: #eef1f5; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; }',

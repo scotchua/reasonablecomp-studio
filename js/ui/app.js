@@ -657,6 +657,18 @@
     });
     wrap.appendChild(banner);
 
+    // Planned wages vs. this range (5.5) — the same headline comparison the
+    // memo leads with, so the app view never makes the reader infer the gap.
+    var pwRaw = (yr.financials || {}).totalOfficerWages;
+    var pwNum = (pwRaw !== null && pwRaw !== undefined && pwRaw !== '' && isFinite(Number(pwRaw))) ? Number(pwRaw) : null;
+    if (pwNum !== null) {
+      var pwText, pwCls;
+      if (pwNum < a.range.low) { pwText = 'Planned wages ' + fmt.usd(pwNum) + ' are ' + fmt.usd(a.range.low - pwNum) + ' below this range (see BELOW_RANGE flag).'; pwCls = 'high'; }
+      else if (pwNum > a.range.high) { pwText = 'Planned wages ' + fmt.usd(pwNum) + ' are ' + fmt.usd(pwNum - a.range.high) + ' above this range (see ABOVE_RANGE note).'; pwCls = 'low'; }
+      else { pwText = 'Planned wages ' + fmt.usd(pwNum) + ' fall within this range — no adjustment indicated.'; pwCls = 'ok'; }
+      wrap.appendChild(el('p', {}, [el('span', { class: 'pill ' + pwCls }, [pwText])]));
+    }
+
     // flags first — never buried
     if (a.flags.length) {
       wrap.appendChild(el('h3', {}, ['Red flags (' + a.flags.length + ')']));
@@ -715,9 +727,15 @@
     var inc = el('div', { class: 'card' });
     inc.appendChild(el('h3', { style: 'margin-top:0' }, ['3 · Income approach (independent investor)']));
     if (a.incomeApproach.applicable) {
-      inc.appendChild(el('p', {}, ['At the proposed salary of ' + fmt.usd(a.incomeApproach.proposedSalary) + ' plus estimated employer payroll cost of ' + fmt.usd(a.incomeApproach.employerPayrollTax) + ', residual return: ', el('strong', {}, [fmt.usd(a.incomeApproach.residual)]), a.incomeApproach.residualShare != null ? ' (' + fmt.pct(a.incomeApproach.residualShare) + ' of pre-comp earnings)' : '']));
-      inc.appendChild(el('p', { class: 'muted' }, [a.incomeApproach.narrative]));
-      inc.appendChild(el('p', { class: 'muted', style: 'font-size:12px' }, [a.incomeApproach.payrollTaxNote]));
+      var ia = a.incomeApproach;
+      inc.appendChild(el('p', {}, ['Tested at ' + fmt.usd(ia.proposedSalary) + ' (' + ia.salaryBasis + ') plus estimated employer payroll cost of ' + fmt.usd(ia.employerPayrollTax) + ', residual return: ', el('strong', {}, [fmt.usd(ia.residual)]), ia.residualShare != null ? ' (' + fmt.pct(ia.residualShare) + ' of pre-comp earnings)' : '']));
+      if (ia.method === 'return on equity') {
+        inc.appendChild(el('p', { class: 'muted' }, ['Method: return on beginning shareholder equity (' + fmt.usd(ia.equity) + ') — ' + fmt.pct(ia.roe) + ' return, vs. a ' + Math.round(CFG.investorReturn.required * 100) + '% benchmark.']));
+      } else {
+        inc.appendChild(el('p', { class: 'muted' }, ['Method: residual-share screen (beginning shareholder equity not provided — a weaker form of this test).']));
+      }
+      inc.appendChild(el('p', { class: 'muted' }, [ia.narrative]));
+      inc.appendChild(el('p', { class: 'muted', style: 'font-size:12px' }, [ia.payrollTaxNote]));
     } else {
       inc.appendChild(el('p', { class: 'muted' }, [a.incomeApproach.reason || 'Not performed.']));
     }
