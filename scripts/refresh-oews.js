@@ -50,7 +50,7 @@ const path = require('path');
 const https = require('https');
 const readline = require('readline');
 
-const USER_AGENT = 'ReasonableCompStudio-WhiteLabel/2.0 (OEWS annual data refresh)';
+const USER_AGENT = 'ReasonableCompStudio-WhiteLabel/2.0 (OEWS annual data refresh; contact: scott.edwards@1953.tax)';
 const BASE_URL = 'https://download.bls.gov/pub/time.series/oe/';
 const FILES = ['oe.release', 'oe.area', 'oe.occupation', 'oe.industry', 'oe.data.0.Current'];
 
