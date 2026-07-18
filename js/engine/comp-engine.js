@@ -204,6 +204,27 @@
     };
   }
 
+  // ------------------------------------------------------- industry comparable
+
+  // National NAICS-sector wage comparable for a role component (corroboration
+  // ONLY -- never affects any total). `data.industry` is optional; shaped as
+  // { sectors: [[code,title],...], wages: { sectorCode: { occCode: row } },
+  // topcode: { sectorCode: { occCode: bitmask } } }. Uses the SAME percentile
+  // and hours/weeks basis as the area-based figure, at the occupation's
+  // full (unshared) wage rate -- not multiplied by the component's % of time,
+  // since it corroborates the occupation's market rate, not this shareholder's
+  // partial allocation to it.
+  function industryComparable(data, sectorCode, soc, percentile, effHours, weeksWorked, cfg) {
+    var ind = data.industry;
+    if (!ind || !ind.wages[sectorCode] || !ind.wages[sectorCode][soc]) return null;
+    var sectorTitle = sectorCode;
+    (ind.sectors || []).forEach(function (s) { if (s[0] === sectorCode) sectorTitle = s[1]; });
+    var lk = { row: ind.wages[sectorCode][soc], topcodeMask: (ind.topcode && ind.topcode[sectorCode] && ind.topcode[sectorCode][soc]) || 0 };
+    var r = availableAt(lk, percentile, effHours, weeksWorked, cfg);
+    if (!r) return null;
+    return { code: sectorCode, name: sectorTitle, mid: r.value, percentile: r.percentile, basis: r.basis };
+  }
+
   // ------------------------------------------------------------- cost approach
 
   // components: [{ roleTitle, soc, pctTime (0-100), percentileOverride?, overrideReason?,
@@ -291,6 +312,17 @@
       });
       if (comp.topcoded) out.notes.push(socDisplay(rc.soc) + ' (' + rc.roleTitle + '): BLS top-coded wage (' + data.topcodeNote + ') — true market wage may be higher; figure is a floor.');
       if (comp.annualScaleCapped) out.notes.push('SOC ' + socDisplay(rc.soc) + ' publishes annual-only wages; annual figures are not scaled above full-time.');
+
+      // National industry-sector comparable (corroboration only; 4.3) —
+      // never affects the totals above.
+      if (rc.industryCode) {
+        var ic = industryComparable(data, rc.industryCode, rc.soc, comp.percentile, hc.effHours, hc.weeksWorked, cfg);
+        if (ic) {
+          comp.industryComparable = ic;
+          out.notes.push('National ' + ic.name + ' industry comparable for SOC ' + socDisplay(rc.soc) + ' at the ' + ic.percentile +
+            'th percentile: $' + Math.round(ic.mid).toLocaleString() + ' — shown for corroboration; the area-based figure remains primary.');
+        }
+      }
       out.components.push(comp);
     });
 
@@ -662,6 +694,7 @@
     analyze: analyze,
     num: num,
     employerPayrollCost: employerPayrollCost,
+    industryComparable: industryComparable,
     lookupWage: lookupWage,
     annualAtPercentile: annualAtPercentile,
     defaultPercentile: defaultPercentile,

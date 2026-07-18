@@ -686,6 +686,51 @@ console.log('Phase 4a: data loader (fixture-based; real generated files land in 
   checkTrue('legacy single-file bundle (no states manifest) resolves synchronously', calledWith === undefined);
 }
 
+// ============================================================ Phase 4c
+// National industry-sector comparable (corroboration only) -- attaches
+// alongside the area-based figure without affecting any total. Fixture: one
+// sector ("541000 Professional, Scientific, and Technical Services") with a
+// 132011 Accountants row at the SAME percentiles as the CdA area fixture (h75
+// = $40/hr) so the comparable's mid is directly comparable to the area figure.
+// 10 yrs experience -> 75th default; 40 hrs/wk, 52 wks (full-time, no scaling):
+// industry comparable mid = $40/hr x 40 x 52 = 83,200 (same basis, unshared).
+console.log('Phase 4c: national industry-sector comparable (corroboration only)');
+{
+  const fixWithIndustry = Object.assign({}, FIX, {
+    industry: {
+      sectors: [['541000', 'Professional, Scientific, and Technical Services']],
+      wages: { '541000': { '132011': [400, 20, 25, 30, 40, 50, 41600, 52000, 62400, 83200, 104000] } },
+      topcode: {},
+    },
+  });
+  const withIndustry = engine.analyze({
+    client,
+    shareholder: { name: 'R', yearsExperience: 10, licenses: '', hoursPerWeek: 40 },
+    roleComponents: [{ roleTitle: 'Accountant', soc: '132011', pctTime: 100, industryCode: '541000' }],
+    financials: {},
+    compHistory: [],
+  }, fixWithIndustry, cfg);
+  const comp = withIndustry.costApproach.components[0];
+  checkTrue('industryComparable is attached', !!comp.industryComparable);
+  check('industryComparable mid = 83,200 (same percentile/hours/weeks basis, unshared)', comp.industryComparable && comp.industryComparable.mid, 83200);
+  check('industryComparable percentile = 75th (matches the component)', comp.industryComparable && comp.industryComparable.percentile, 75);
+  checkTrue('corroboration note names the sector and SOC', withIndustry.costApproach.notes.some(n => n.includes('Professional, Scientific, and Technical Services') && n.includes('13-2011') && n.includes('corroboration')));
+
+  // Same input, WITHOUT industryCode set -- totals must be IDENTICAL, and no
+  // industryComparable/corroboration note should appear.
+  const withoutIndustry = engine.analyze({
+    client,
+    shareholder: { name: 'R', yearsExperience: 10, licenses: '', hoursPerWeek: 40 },
+    roleComponents: [{ roleTitle: 'Accountant', soc: '132011', pctTime: 100 }],
+    financials: {},
+    compHistory: [],
+  }, fixWithIndustry, cfg);
+  check('totals unaffected by industryCode (low)', withIndustry.costApproach.low, withoutIndustry.costApproach.low);
+  check('totals unaffected by industryCode (mid)', withIndustry.costApproach.mid, withoutIndustry.costApproach.mid);
+  check('totals unaffected by industryCode (high)', withIndustry.costApproach.high, withoutIndustry.costApproach.high);
+  checkTrue('no industryComparable when industryCode is unset', !withoutIndustry.costApproach.components[0].industryComparable);
+}
+
 // ============================================================ Integration
 // Run against the REAL generated data file: internal consistency only.
 console.log('Integration: real May-release OEWS data (core + per-state files via the loader)');

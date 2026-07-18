@@ -368,7 +368,9 @@
       el('th', {}, ['Role / hat']), el('th', {}, ['SOC occupation']), el('th', { class: 'num' }, ['% time']),
       el('th', {}, ['Percentile']), el('th', { class: 'num', title: 'Component-specific years of experience — blank inherits the shareholder-level figure above' }, ['Yrs (override)']),
       el('th', { title: 'The professional license/credential applies to this hat' }, ['Lic?']),
-      el('th', {}, ['Override reason']), el('th', {}, ['']),
+      el('th', {}, ['Override reason']),
+      el('th', { title: 'Optional national NAICS-sector wage comparable, shown for corroboration only — never affects the totals' }, ['Industry (national)']),
+      el('th', {}, ['']),
     ]));
     yr.roleComponents.forEach(function (rc, idx) {
       var tr = el('tr');
@@ -387,6 +389,20 @@
       licCb.checked = !!rc.licenseApplies;
       tr.appendChild(el('td', { style: 'text-align:center' }, [licCb]));
       tr.appendChild(el('td', {}, [el('input', { value: rc.overrideReason || '', placeholder: 'required if overridden', onchange: function (e) { rc.overrideReason = e.target.value; save(); } })]));
+      if (DATA.industry && DATA.industry.sectors && DATA.industry.sectors.length) {
+        var indSel = el('select', { onchange: function (e) { rc.industryCode = e.target.value || null; save(); } });
+        var indPlaceholder = el('option', { value: '' }, ['(none)']);
+        if (!rc.industryCode) indPlaceholder.selected = true;
+        indSel.appendChild(indPlaceholder);
+        DATA.industry.sectors.forEach(function (s) {
+          var op = el('option', { value: s[0] }, [s[1]]);
+          if (rc.industryCode === s[0]) op.selected = true;
+          indSel.appendChild(op);
+        });
+        tr.appendChild(el('td', {}, [indSel]));
+      } else {
+        tr.appendChild(el('td', { class: 'muted', title: 'Run scripts/refresh-oews.js (full network refresh) for industry comparables' }, ['—']));
+      }
       tr.appendChild(el('td', {}, [el('button', { class: 'ghost small', onclick: function () { yr.roleComponents.splice(idx, 1); save(); render(); } }, ['✕'])]));
       tbl.appendChild(tr);
     });
@@ -793,6 +809,12 @@
   }
 
   // ------------------------------------------------------------------ boot
+
+  // National industry-sector wage comparables (4.3) are an optional,
+  // separately-generated data file -- only produced by a full network refresh
+  // (node scripts/refresh-oews.js), so it may not exist yet. Treated as fully
+  // optional everywhere it's consulted.
+  DATA.industry = window.RCT_INDUSTRY || null;
 
   document.getElementById('vintage').textContent = 'BLS OEWS ' + DATA.release + ' release';
   render();

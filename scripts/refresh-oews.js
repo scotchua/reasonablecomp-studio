@@ -7,7 +7,13 @@
  * regenerates the wage data bundle as js/data/oews-core.js (national wages,
  * the full area/occupation index, and a per-state file manifest) plus one
  * js/data/oews/state-<fips>.js file per state/territory, loaded on demand by
- * js/data/loader.js. No server, no build step — plain <script> tags.
+ * js/data/loader.js, plus js/data/oews-industry.js (national NAICS-sector wage
+ * comparables, shown in the app for corroboration only). No server, no build
+ * step — plain <script> tags.
+ *
+ * NOTE: a full network refresh requires real internet access to
+ * download.bls.gov and is NOT possible from a sandboxed/cloud dev
+ * environment with no outbound network -- run it on a normal machine/network.
  *
  * Usage:
  *   node scripts/refresh-oews.js                 # download fresh files, then build
@@ -40,7 +46,7 @@ const readline = require('readline');
 
 const USER_AGENT = 'ReasonableCompStudio-WhiteLabel/2.0 (OEWS annual data refresh)';
 const BASE_URL = 'https://download.bls.gov/pub/time.series/oe/';
-const FILES = ['oe.release', 'oe.area', 'oe.occupation', 'oe.data.0.Current'];
+const FILES = ['oe.release', 'oe.area', 'oe.occupation', 'oe.industry', 'oe.data.0.Current'];
 
 // Datatypes we keep (see oe.datatype):
 // 01 employment; 06-10 hourly 10/25/50/75/90; 11-15 annual 10/25/50/75/90.
@@ -57,6 +63,16 @@ const DATA_DIR = path.join(__dirname, '..', 'js', 'data');
 const OEWS_DIR = path.join(DATA_DIR, 'oews');
 const CORE_OUT = path.join(DATA_DIR, 'oews-core.js');
 const LEGACY_OUT = path.join(DATA_DIR, 'oews-data.js');
+const INDUSTRY_OUT = path.join(DATA_DIR, 'oews-industry.js');
+
+// display_level value BLS's oe.industry file uses for NAICS SECTOR-level rows
+// (as distinct from '0' cross-industry total, or deeper 3-/4-/5-/6-digit NAICS
+// detail). This is BLS's documented oe.industry hierarchy convention, but it
+// is VERIFIED against the live file at run time (see readIndustrySectors())
+// rather than trusted blindly -- if the file's actual values don't match,
+// the refresh aborts with the full set of values found so this constant can
+// be corrected against the real file.
+const INDUSTRY_SECTOR_DISPLAY_LEVEL = '1';
 
 function download(file, destDir) {
   const dest = path.join(destDir, file);
@@ -93,6 +109,36 @@ function socLevel(code) {
   if (code.endsWith('000')) return 'minor';
   if (code.endsWith('0')) return 'broad';
   return 'detailed';
+}
+
+// ---- national industry-sector comparables (4.3) ------------------------
+// Reads oe.industry and returns the NAICS sector-level rows, VERIFYING the
+// display_level column and value against the live file rather than trusting
+// INDUSTRY_SECTOR_DISPLAY_LEVEL blindly -- if the schema doesn't match what's
+// expected, this aborts with every display_level value actually present so a
+// human can correct the constant against the real file, instead of silently
+// keeping the wrong rows (e.g. cross-industry totals or 4-digit NAICS detail).
+function readIndustrySectors(dir) {
+  const industryPath = path.join(dir, 'oe.industry');
+  if (!fs.existsSync(industryPath)) {
+    throw new Error(`oe.industry not found in ${dir} -- industry comparables require this file (add it to a --local flat-file directory, or let this script download it).`);
+  }
+  const rows = readTsv(industryPath);
+  if (!rows.length || !('display_level' in rows[0])) {
+    const cols = rows.length ? Object.keys(rows[0]).join(', ') : '(no rows)';
+    throw new Error(`oe.industry does not have a 'display_level' column (columns found: ${cols}). Update readIndustrySectors() to match the real BLS schema before proceeding -- industry comparables are being SKIPPED, not silently miscategorized.`);
+  }
+  const levelsSeen = {};
+  rows.forEach((r) => { levelsSeen[r.display_level] = (levelsSeen[r.display_level] || 0) + 1; });
+  const sectorRows = rows.filter((r) => r.display_level === INDUSTRY_SECTOR_DISPLAY_LEVEL && r.industry_code !== '000000');
+  console.log(`oe.industry display_level counts: ${JSON.stringify(levelsSeen)}`);
+  console.log(`Industry sector rows kept (display_level=${INDUSTRY_SECTOR_DISPLAY_LEVEL}): ${sectorRows.length}`);
+  if (!sectorRows.length) {
+    throw new Error(`No oe.industry rows matched display_level='${INDUSTRY_SECTOR_DISPLAY_LEVEL}' (levels present: ${Object.keys(levelsSeen).join(', ')}). Correct INDUSTRY_SECTOR_DISPLAY_LEVEL to match the real file before proceeding.`);
+  }
+  sectorRows.slice(0, 25).forEach((r) => console.log(`  kept sector: ${r.industry_code} ${r.industry_name}`));
+  if (sectorRows.length > 25) console.log(`  ...and ${sectorRows.length - 25} more.`);
+  return sectorRows;
 }
 
 // ---- shared emission --------------------------------------------------
@@ -176,11 +222,17 @@ async function build(dir) {
   const occSet = new Set(keptOccs.map((o) => o.occupation_code));
   console.log(`Occupations kept: ${keptOccs.length} of ${occRows.length}`);
 
+  // ---- industry sectors (4.3, national comparables only) -----------------
+  const sectorRows = readIndustrySectors(dir);
+  const sectorCodeSet = new Set(sectorRows.map((r) => r.industry_code));
+
   // ---- stream the data file ---------------------------------------------
   // series_id layout: OE U <areatype:1> <area:7> <industry:6> <occupation:6> <datatype:2>
   const wages = {};       // area_code -> { occ_code -> Array(WAGE_SLOTS) }
   const topcode = {};     // area_code -> { occ_code -> bitmask over slots 1..10 }
-  let kept = 0, scanned = 0;
+  const industryWages = {};   // sector_code -> { occ_code -> Array(WAGE_SLOTS) } -- NATIONAL AREA ONLY
+  const industryTopcode = {}; // sector_code -> { occ_code -> bitmask }
+  let kept = 0, scanned = 0, industryKept = 0;
 
   const rl = readline.createInterface({
     input: fs.createReadStream(path.join(dir, 'oe.data.0.Current')),
@@ -191,12 +243,10 @@ async function build(dir) {
     if (!line.startsWith('OEU')) continue; // header
     const seriesId = line.slice(0, line.indexOf('\t')).trim();
     const industry = seriesId.slice(11, 17);
-    if (industry !== '000000') continue; // cross-industry only
     const datatype = seriesId.slice(23, 25);
     const slot = DATATYPE_SLOT[datatype];
     if (slot === undefined) continue;
     const area = seriesId.slice(4, 11);
-    if (!areaSet.has(area)) continue;
     const occ = seriesId.slice(17, 23);
     if (!occSet.has(occ)) continue;
 
@@ -207,16 +257,30 @@ async function build(dir) {
     const value = parseFloat(rawValue);
     if (!isFinite(value)) continue;
 
-    (wages[area] = wages[area] || {});
-    (wages[area][occ] = wages[area][occ] || new Array(WAGE_SLOTS).fill(null));
-    wages[area][occ][slot] = value;
-    if (slot > 0 && footnotes.includes(TOPCODE_FOOTNOTE)) {
-      (topcode[area] = topcode[area] || {});
-      topcode[area][occ] = (topcode[area][occ] || 0) | (1 << (slot - 1));
+    if (industry === '000000' && areaSet.has(area)) {
+      // Primary cross-industry dataset (unchanged from before Phase 4.3).
+      (wages[area] = wages[area] || {});
+      (wages[area][occ] = wages[area][occ] || new Array(WAGE_SLOTS).fill(null));
+      wages[area][occ][slot] = value;
+      if (slot > 0 && footnotes.includes(TOPCODE_FOOTNOTE)) {
+        (topcode[area] = topcode[area] || {});
+        topcode[area][occ] = (topcode[area][occ] || 0) | (1 << (slot - 1));
+      }
+      kept++;
+    } else if (area === '0000000' && sectorCodeSet.has(industry)) {
+      // National industry-sector comparable (corroboration only; 4.3) --
+      // NEVER mixed into the primary `wages` object above.
+      (industryWages[industry] = industryWages[industry] || {});
+      (industryWages[industry][occ] = industryWages[industry][occ] || new Array(WAGE_SLOTS).fill(null));
+      industryWages[industry][occ][slot] = value;
+      if (slot > 0 && footnotes.includes(TOPCODE_FOOTNOTE)) {
+        (industryTopcode[industry] = industryTopcode[industry] || {});
+        industryTopcode[industry][occ] = (industryTopcode[industry][occ] || 0) | (1 << (slot - 1));
+      }
+      industryKept++;
     }
-    kept++;
   }
-  console.log(`Data rows scanned: ${scanned.toLocaleString()}, kept: ${kept.toLocaleString()}`);
+  console.log(`Data rows scanned: ${scanned.toLocaleString()}, kept (cross-industry): ${kept.toLocaleString()}, kept (industry-sector, national only): ${industryKept.toLocaleString()}`);
 
   // Drop occupation entries with no wage data at all in any kept area,
   // but keep the reference list intact for autocomplete honesty.
@@ -247,6 +311,18 @@ async function build(dir) {
   console.log(`Core file written: ${CORE_OUT}`);
   const coreMb = (fs.statSync(CORE_OUT).size / 1024 / 1024).toFixed(2);
   console.log(`Core file size: ${coreMb} MB`);
+
+  // ---- industry-sector comparables (4.3) ----------------------------------
+  const industryOut = {
+    sectors: sectorRows.map((r) => [r.industry_code, r.industry_name]),
+    wages: industryWages,
+    topcode: industryTopcode,
+  };
+  const industryJs = `// GENERATED by scripts/refresh-oews.js — do not edit by hand.\n` +
+    `// BLS OEWS ${releaseLabel} release. National NAICS-sector wage comparables (corroboration only).\n` +
+    `window.RCT_INDUSTRY = ${JSON.stringify(industryOut)};\n`;
+  fs.writeFileSync(INDUSTRY_OUT, industryJs);
+  console.log(`Industry comparables written: ${INDUSTRY_OUT} (${sectorRows.length} sectors)`);
 
   // ---- self-audit ---------------------------------------------------------
   // Only a full nationwide refresh (no --states) is expected to clear these;
