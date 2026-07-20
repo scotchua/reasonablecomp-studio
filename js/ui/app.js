@@ -71,6 +71,36 @@
 
   function occTitle(code) { return occByCode[code] ? occByCode[code][1] : code; }
 
+  // Display label for an area row: "· <metro>", "State: <state>", or the bare
+  // national label. Shared by the area-search results list and the picker's
+  // own input value so they always read identically.
+  function areaLabel(a) { return (a[2] === 'M' ? '· ' : a[2] === 'S' ? 'State: ' : '') + a[1]; }
+
+  // Search-as-you-type over the full nationwide area list (national + every
+  // state + every metro/nonmetro area) -- a plain flat <select> stopped being
+  // usable once nationwide metro coverage landed (~400+ entries). Mirrors
+  // searchOccupations()'s pattern: multi-term AND match, capped result count,
+  // name-prefix matches surfaced first.
+  function searchAreas(q) {
+    q = q.trim().toLowerCase();
+    if (q.length < 2) return [];
+    var terms = q.split(/\s+/);
+    var res = [];
+    for (var i = 0; i < DATA.areas.length && res.length < 400; i++) {
+      var a = DATA.areas[i];
+      var hay = a[1].toLowerCase();
+      var hit = terms.every(function (t) { return hay.indexOf(t) !== -1; });
+      if (hit) res.push(a);
+    }
+    var order = { N: 0, S: 1, M: 2 };
+    res.sort(function (a, b) {
+      var at = a[1].toLowerCase().indexOf(terms[0]) === 0 ? 0 : 1;
+      var bt = b[1].toLowerCase().indexOf(terms[0]) === 0 ? 0 : 1;
+      return at - bt || order[a[2]] - order[b[2]] || a[1].localeCompare(b[1]);
+    });
+    return res.slice(0, 25);
+  }
+
   function searchOccupations(q) {
     q = q.trim().toLowerCase();
     if (q.length < 2) return [];
@@ -251,24 +281,7 @@
     grid.appendChild(field('Company name', c.name, function (v) { c.name = v; }));
     grid.appendChild(selectField('Entity type', c.entityType, ['S-Corp', 'LLC taxed as S-Corp'], function (v) { c.entityType = v; }));
     grid.appendChild(field('Fiscal year end', c.fiscalYearEnd, function (v) { c.fiscalYearEnd = v; }));
-    var areaSel = el('div', {}, [el('label', {}, ['Principal work area (OEWS)'])]);
-    var sel = el('select', {
-      onchange: function () { c.areaCode = sel.value; save(); render(); if (c.areaCode) LOADER.ensure(c.areaCode, function () {}); },
-    });
-    if (c.areaCode) LOADER.ensure(c.areaCode, function () {}); // fire-and-forget prefetch
-    var placeholderOpt = el('option', { value: '' }, ['(select the principal work area)']);
-    if (!c.areaCode) placeholderOpt.selected = true;
-    sel.appendChild(placeholderOpt);
-    DATA.areas.slice().sort(function (a, b) {
-      var order = { N: 0, S: 1, M: 2 };
-      return order[a[2]] - order[b[2]] || a[1].localeCompare(b[1]);
-    }).forEach(function (a) {
-      var o = el('option', { value: a[0] }, [(a[2] === 'M' ? '· ' : a[2] === 'S' ? 'State: ' : '') + a[1]]);
-      if (a[0] === c.areaCode) o.selected = true;
-      sel.appendChild(o);
-    });
-    areaSel.appendChild(sel);
-    grid.appendChild(areaSel);
+    grid.appendChild(el('div', {}, [el('label', {}, ['Principal work area (OEWS)']), areaPicker(c)]));
     card.appendChild(grid);
     card.appendChild(el('p', { class: 'muted' }, ['The work area drives every wage lookup. If an occupation has no published figure there, the tool automatically falls back to the state, then national figure — and says so in the memo.']));
     root.appendChild(card);
@@ -302,6 +315,36 @@
       var s = el('select', { onchange: function (e) { set(e.target.value); save(); } });
       opts.forEach(function (o) { var op = el('option', { value: o }, [o]); if (o === val) op.selected = true; s.appendChild(op); });
       return el('div', {}, [el('label', {}, [lbl]), s]);
+    }
+    // Search-as-you-type replacement for the old flat <select> (~400+ areas
+    // nationwide makes a plain dropdown unusable). Same interaction pattern
+    // as the SOC occupation picker elsewhere in this app.
+    function areaPicker(client) {
+      if (client.areaCode) LOADER.ensure(client.areaCode, function () {}); // fire-and-forget prefetch
+      var wrap = el('div', { class: 'autocomplete area-autocomplete' });
+      var inp = el('input', {
+        value: client.areaCode && areaByCode[client.areaCode] ? areaLabel(areaByCode[client.areaCode]) : '',
+        placeholder: 'search city, metro, or state…',
+      });
+      var list = el('div', { class: 'ac-list hidden' });
+      inp.addEventListener('input', function () {
+        var res = searchAreas(inp.value);
+        list.innerHTML = '';
+        if (!res.length) { list.classList.add('hidden'); return; }
+        res.forEach(function (a) {
+          var item = el('div', { class: 'ac-item', onmousedown: function (ev) {
+            ev.preventDefault();
+            client.areaCode = a[0];
+            save(); render();
+            LOADER.ensure(client.areaCode, function () {});
+          } }, [el('div', { class: 't' }, [areaLabel(a)])]);
+          list.appendChild(item);
+        });
+        list.classList.remove('hidden');
+      });
+      inp.addEventListener('blur', function () { setTimeout(function () { list.classList.add('hidden'); }, 150); });
+      wrap.appendChild(inp); wrap.appendChild(list);
+      return wrap;
     }
   }
 
