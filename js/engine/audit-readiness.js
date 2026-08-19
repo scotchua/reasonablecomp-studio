@@ -5,7 +5,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  function evaluate(yr, analysis, data, cfg, currentInputFingerprint) {
+  function evaluate(yr, analysis, data, cfg, currentInputFingerprint, client) {
     yr = yr || {};
     var roles = yr.roleComponents || [];
     var total = roles.reduce(function (sum, role) { return sum + (Number(role.pctTime) || 0); }, 0);
@@ -21,7 +21,8 @@
     var requiredEvidence = cfg.auditRequiredEvidence || [];
     var evidenceCount = requiredEvidence.filter(function (key) { return evidence[key]; }).length;
     var items = [
-      { id: 'profile', label: 'Duties and service hours documented', blocking: true, complete: !!String(yr.duties || '').trim() && Number(yr.hoursPerWeek) > 0 },
+      { id: 'area', label: 'Principal OEWS work area selected', blocking: true, complete: !!(client && client.areaCode) },
+      { id: 'profile', label: 'Duties and service hours documented', blocking: true, complete: !!String(yr.duties || '').trim() && Number(yr.hoursPerWeek) > 0 && (Number(yr.hoursPerWeek) <= 40 || !!yr.hoursCorroborated) },
       { id: 'roles', label: 'SOC roles selected and time reconciles to 100%', blocking: true, complete: roles.length > 0 && roles.every(function (r) { return !!r.soc; }) && Math.abs(total - 100) < 0.01, detail: 'Current allocation: ' + total.toFixed(1) + '%' },
       { id: 'overrides', label: 'Every percentile override has a specific rationale', blocking: true, complete: overridesOk },
       { id: 'revenue', label: 'Source of gross receipts reconciles to 100%', blocking: true, complete: Math.abs(revTotal - 100) < 0.01 && String(rev.notes || '').trim().length >= 20, detail: 'Current allocation: ' + revTotal.toFixed(1) + '%' },

@@ -13,6 +13,7 @@
   var ENG = window.RCTEngine;
   var INTEGRITY = window.RCTIntegrity;
   var READINESS = window.RCTReadiness;
+  var LOADER = window.RCTDataLoader;
   // A distinct storage key prevents a white-label copy from reading data saved
   // by a firm-branded installation on the same computer.
   var LS_KEY = 'reasonablecomp-studio-whitelabel-v1';
@@ -41,6 +42,7 @@
     if (!sh.years[year]) {
       sh.years[year] = {
         education: '', licenses: '', yearsExperience: '', hoursPerWeek: 40,
+        weeksWorkedPerYear: 52, hoursCorroborated: false,
         seasonality: '', duties: '', writtenAgreement: false, setInAdvance: false, formulaNote: '',
         roleComponents: [], financials: {}, flagResponses: {}, analysis: null,
         revenueSources: { shareholderServicesPct: 0, employeeServicesPct: 0, capitalEquipmentPct: 0, notes: '' },
@@ -52,6 +54,11 @@
     rec.revenueSources = rec.revenueSources || { shareholderServicesPct: 0, employeeServicesPct: 0, capitalEquipmentPct: 0, notes: '' };
     rec.evidence = rec.evidence || {};
     rec.approval = rec.approval || { approvedBy: '', approvedDate: '', conclusionNotes: '' };
+    // Patch onto records created before these fields existed (import of an
+    // older client file, or a year record started under RCT-2.0) — blank
+    // defaults keep prior analyses' assumptions unchanged until re-run.
+    if (rec.weeksWorkedPerYear === undefined || rec.weeksWorkedPerYear === null || rec.weeksWorkedPerYear === '') rec.weeksWorkedPerYear = 52;
+    if (rec.hoursCorroborated === undefined) rec.hoursCorroborated = false;
     return rec;
   }
 
@@ -63,6 +70,36 @@
   DATA.areas.forEach(function (a) { areaByCode[a[0]] = a; });
 
   function occTitle(code) { return occByCode[code] ? occByCode[code][1] : code; }
+
+  // Display label for an area row: "· <metro>", "State: <state>", or the bare
+  // national label. Shared by the area-search results list and the picker's
+  // own input value so they always read identically.
+  function areaLabel(a) { return (a[2] === 'M' ? '· ' : a[2] === 'S' ? 'State: ' : '') + a[1]; }
+
+  // Search-as-you-type over the full nationwide area list (national + every
+  // state + every metro/nonmetro area) -- a plain flat <select> stopped being
+  // usable once nationwide metro coverage landed (~400+ entries). Mirrors
+  // searchOccupations()'s pattern: multi-term AND match, capped result count,
+  // name-prefix matches surfaced first.
+  function searchAreas(q) {
+    q = q.trim().toLowerCase();
+    if (q.length < 2) return [];
+    var terms = q.split(/\s+/);
+    var res = [];
+    for (var i = 0; i < DATA.areas.length && res.length < 400; i++) {
+      var a = DATA.areas[i];
+      var hay = a[1].toLowerCase();
+      var hit = terms.every(function (t) { return hay.indexOf(t) !== -1; });
+      if (hit) res.push(a);
+    }
+    var order = { N: 0, S: 1, M: 2 };
+    res.sort(function (a, b) {
+      var at = a[1].toLowerCase().indexOf(terms[0]) === 0 ? 0 : 1;
+      var bt = b[1].toLowerCase().indexOf(terms[0]) === 0 ? 0 : 1;
+      return at - bt || order[a[2]] - order[b[2]] || a[1].localeCompare(b[1]);
+    });
+    return res.slice(0, 25);
+  }
 
   function searchOccupations(q) {
     q = q.trim().toLowerCase();
@@ -209,12 +246,17 @@
       'Wage data: BLS OEWS ' + DATA.release + ' release (generated ' + new Date(DATA.generatedAt).toLocaleDateString() + '). ' +
       'Refresh annually each May: node scripts/refresh-oews.js',
     ]));
+    if (!DATA.eci || !DATA.industry) {
+      root.appendChild(el('p', { class: 'muted' }, [
+        'Industry/ECI data not yet generated — run scripts/refresh-oews.js for full coverage.',
+      ]));
+    }
   }
 
   function addClient() {
     var name = prompt('Client (company) name:');
     if (!name) return;
-    var c = { id: newId(), name: name, entityType: 'S-Corp', state: '', areaCode: '0017660', fiscalYearEnd: '12/31', shareholders: [] };
+    var c = { id: newId(), name: name, entityType: 'S-Corp', state: '', areaCode: '', fiscalYearEnd: '12/31', shareholders: [] };
     store.clients.push(c); save(); nav('#/client/' + c.id);
   }
 
@@ -239,20 +281,7 @@
     grid.appendChild(field('Company name', c.name, function (v) { c.name = v; }));
     grid.appendChild(selectField('Entity type', c.entityType, ['S-Corp', 'LLC taxed as S-Corp'], function (v) { c.entityType = v; }));
     grid.appendChild(field('Fiscal year end', c.fiscalYearEnd, function (v) { c.fiscalYearEnd = v; }));
-    var areaSel = el('div', {}, [el('label', {}, ['Principal work area (OEWS)'])]);
-    var sel = el('select', {
-      onchange: function () { c.areaCode = sel.value; save(); },
-    });
-    DATA.areas.slice().sort(function (a, b) {
-      var order = { N: 0, S: 1, M: 2 };
-      return order[a[2]] - order[b[2]] || a[1].localeCompare(b[1]);
-    }).forEach(function (a) {
-      var o = el('option', { value: a[0] }, [(a[2] === 'M' ? '· ' : a[2] === 'S' ? 'State: ' : '') + a[1]]);
-      if (a[0] === c.areaCode) o.selected = true;
-      sel.appendChild(o);
-    });
-    areaSel.appendChild(sel);
-    grid.appendChild(areaSel);
+    grid.appendChild(el('div', {}, [el('label', {}, ['Principal work area (OEWS)']), areaPicker(c)]));
     card.appendChild(grid);
     card.appendChild(el('p', { class: 'muted' }, ['The work area drives every wage lookup. If an occupation has no published figure there, the tool automatically falls back to the state, then national figure — and says so in the memo.']));
     root.appendChild(card);
@@ -287,6 +316,36 @@
       opts.forEach(function (o) { var op = el('option', { value: o }, [o]); if (o === val) op.selected = true; s.appendChild(op); });
       return el('div', {}, [el('label', {}, [lbl]), s]);
     }
+    // Search-as-you-type replacement for the old flat <select> (~400+ areas
+    // nationwide makes a plain dropdown unusable). Same interaction pattern
+    // as the SOC occupation picker elsewhere in this app.
+    function areaPicker(client) {
+      if (client.areaCode) LOADER.ensure(client.areaCode, function () {}); // fire-and-forget prefetch
+      var wrap = el('div', { class: 'autocomplete area-autocomplete' });
+      var inp = el('input', {
+        value: client.areaCode && areaByCode[client.areaCode] ? areaLabel(areaByCode[client.areaCode]) : '',
+        placeholder: 'search city, metro, or state…',
+      });
+      var list = el('div', { class: 'ac-list hidden' });
+      inp.addEventListener('input', function () {
+        var res = searchAreas(inp.value);
+        list.innerHTML = '';
+        if (!res.length) { list.classList.add('hidden'); return; }
+        res.forEach(function (a) {
+          var item = el('div', { class: 'ac-item', onmousedown: function (ev) {
+            ev.preventDefault();
+            client.areaCode = a[0];
+            save(); render();
+            LOADER.ensure(client.areaCode, function () {});
+          } }, [el('div', { class: 't' }, [areaLabel(a)])]);
+          list.appendChild(item);
+        });
+        list.classList.remove('hidden');
+      });
+      inp.addEventListener('blur', function () { setTimeout(function () { list.classList.add('hidden'); }, 150); });
+      wrap.appendChild(inp); wrap.appendChild(list);
+      return wrap;
+    }
   }
 
   // ------------------------------------------------------------------ workspace
@@ -311,7 +370,7 @@
     root.appendChild(head);
 
     var currentInputFingerprint = INTEGRITY.fingerprint(buildEngineInput(c, sh, year));
-    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, currentInputFingerprint);
+    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, currentInputFingerprint, c);
     var health = el('section', { class: 'readiness-card ' + (readiness.finalizable ? 'ready' : 'open') });
     var ring = el('div', { class: 'score-ring', style: '--score:' + readiness.score }, [
       el('strong', {}, [readiness.score + '%']),
@@ -334,9 +393,12 @@
     fc.appendChild(el('h3', { style: 'margin-top:0' }, ['Facts & circumstances (multi-factor test inputs)']));
     var g = el('div', { class: 'grid c3' });
     g.appendChild(selField('Education', yr.education, [''].concat(CFG.educationLevels), function (v) { yr.education = v; }));
-    g.appendChild(txtField('Licenses / certifications', yr.licenses, function (v) { yr.licenses = v; }, 'e.g. CPA, PE, RN — raises the default wage percentile'));
+    g.appendChild(txtField('Licenses / certifications', yr.licenses, function (v) { yr.licenses = v; }, 'e.g. CPA, PE, RN — mark "Lic?" on the role components this applies to'));
     g.appendChild(numField('Years of relevant experience', yr.yearsExperience, function (v) { yr.yearsExperience = v; }));
-    g.appendChild(numField('Hours per week devoted', yr.hoursPerWeek, function (v) { yr.hoursPerWeek = v; }));
+    var hoursCell = el('div', {}, [el('label', {}, ['Hours per week devoted']), el('input', { type: 'number', value: yr.hoursPerWeek == null || yr.hoursPerWeek === '' ? '' : yr.hoursPerWeek, onchange: function (e) { yr.hoursPerWeek = e.target.value === '' ? null : Number(e.target.value); save(); render(); } })]);
+    hoursCell.appendChild(checkLine('Hours above 40/week are supported by retained time records (calendar, time study)', yr.hoursCorroborated, function (v) { yr.hoursCorroborated = v; }));
+    g.appendChild(hoursCell);
+    g.appendChild(numField('Weeks worked per year', yr.weeksWorkedPerYear, function (v) { yr.weeksWorkedPerYear = v; }));
     g.appendChild(txtField('Seasonality / part-year note', yr.seasonality, function (v) { yr.seasonality = v; }, 'blank = year-round'));
     fc.appendChild(g);
     fc.appendChild(el('label', { style: 'margin-top:10px' }, ['Duties and responsibilities actually performed (reported verbatim in the memo; tie to the role components below)']));
@@ -348,11 +410,15 @@
     // ---- role components ----
     var rcCard = el('div', { class: 'card' });
     rcCard.appendChild(el('h3', { style: 'margin-top:0' }, ['Role components — the "hats"']));
-    rcCard.appendChild(el('p', { class: 'muted' }, ['Decompose what ' + sh.name + ' actually does into occupations. Percentile defaults from experience/licensure (' + describeTier() + '); override per component only with a documented reason.']));
+    rcCard.appendChild(el('p', { class: 'muted' }, ['Decompose what ' + sh.name + ' actually does into occupations. Percentile defaults from experience (' + describeTier() + '); check "Lic?" on a component only if the license/certification entered above is actually relevant to that hat; override per component only with a documented reason.']));
     var tbl = el('table', { class: 'data' });
     tbl.appendChild(el('tr', {}, [
       el('th', {}, ['Role / hat']), el('th', {}, ['SOC occupation']), el('th', { class: 'num' }, ['% time']),
-      el('th', {}, ['Percentile']), el('th', {}, ['Override reason']), el('th', {}, ['']),
+      el('th', {}, ['Percentile']), el('th', { class: 'num', title: 'Component-specific years of experience — blank inherits the shareholder-level figure above' }, ['Yrs (override)']),
+      el('th', { title: 'The professional license/credential applies to this hat' }, ['Lic?']),
+      el('th', {}, ['Override reason']),
+      el('th', { title: 'Optional national NAICS-sector wage comparable, shown for corroboration only — never affects the totals' }, ['Industry (national)']),
+      el('th', {}, ['']),
     ]));
     yr.roleComponents.forEach(function (rc, idx) {
       var tr = el('tr');
@@ -366,7 +432,25 @@
         pctSel.appendChild(op);
       });
       tr.appendChild(el('td', { style: 'width:130px' }, [pctSel]));
+      tr.appendChild(el('td', { class: 'num', style: 'width:90px' }, [el('input', { type: 'number', value: rc.yearsExperienceOverride == null || rc.yearsExperienceOverride === '' ? '' : rc.yearsExperienceOverride, placeholder: 'inherit', title: 'Blank inherits the shareholder-level years of experience', onchange: function (e) { rc.yearsExperienceOverride = e.target.value === '' ? null : Number(e.target.value); save(); } })]));
+      var licCb = el('input', { type: 'checkbox', title: 'The professional license/credential applies to this hat', onchange: function (e) { rc.licenseApplies = e.target.checked; save(); } });
+      licCb.checked = !!rc.licenseApplies;
+      tr.appendChild(el('td', { style: 'text-align:center' }, [licCb]));
       tr.appendChild(el('td', {}, [el('input', { value: rc.overrideReason || '', placeholder: 'required if overridden', onchange: function (e) { rc.overrideReason = e.target.value; save(); } })]));
+      if (DATA.industry && DATA.industry.sectors && DATA.industry.sectors.length) {
+        var indSel = el('select', { onchange: function (e) { rc.industryCode = e.target.value || null; save(); } });
+        var indPlaceholder = el('option', { value: '' }, ['(none)']);
+        if (!rc.industryCode) indPlaceholder.selected = true;
+        indSel.appendChild(indPlaceholder);
+        DATA.industry.sectors.forEach(function (s) {
+          var op = el('option', { value: s[0] }, [s[1]]);
+          if (rc.industryCode === s[0]) op.selected = true;
+          indSel.appendChild(op);
+        });
+        tr.appendChild(el('td', {}, [indSel]));
+      } else {
+        tr.appendChild(el('td', { class: 'muted', title: 'Run scripts/refresh-oews.js (full network refresh) for industry comparables' }, ['—']));
+      }
       tr.appendChild(el('td', {}, [el('button', { class: 'ghost small', onclick: function () { yr.roleComponents.splice(idx, 1); save(); render(); } }, ['✕'])]));
       tbl.appendChild(tr);
     });
@@ -392,6 +476,7 @@
     fg.appendChild(numField('Total distributions to this shareholder', f.totalDistributions, function (v) { f.totalDistributions = v; }));
     fg.appendChild(numField('Officer wages paid (current/planned)', f.totalOfficerWages, function (v) { f.totalOfficerWages = v; }));
     fg.appendChild(numField('Highest non-shareholder employee wage', f.highestNonShareholderWage, function (v) { f.highestNonShareholderWage = v; }));
+    fg.appendChild(numField('Total shareholder equity (book value, beginning of year)', f.shareholderEquity, function (v) { f.shareholderEquity = v; }));
     fin.appendChild(fg);
     fin.appendChild(el('label', { style: 'margin-top:8px' }, ['Highest-paid non-shareholder role (for the internal-comparable factor)']));
     fin.appendChild(el('input', { value: f.highestNonShareholderRole || '', onchange: function (e) { f.highestNonShareholderRole = e.target.value; save(); } }));
@@ -528,55 +613,83 @@
 
   function buildEngineInput(c, sh, year) {
     var yr = yearRec(sh, year);
+    // Every OTHER shareholder of this client with a stored analysis for the same
+    // tax year (1.11) -- feeds COMBINED_EXCEEDS_CAPACITY so one shareholder's
+    // recommendation is tested against what the company can pay ALL owners at
+    // once, not just this one against the company's entire NIBC. Known ripple:
+    // this makes otherShareholders part of the engine input, so running a
+    // sibling's analysis changes THIS shareholder's input fingerprint (the
+    // dashboard pill flips to "inputs changed - re-run"). That's self-healing —
+    // re-run picks up the sibling's latest number — and is documented in the
+    // README workflow section, not "fixed".
+    var otherShareholders = (c.shareholders || [])
+      .filter(function (sib) { return sib.id !== sh.id; })
+      .map(function (sib) {
+        var sibYr = (sib.years || {})[year];
+        if (!sibYr || !sibYr.analysis || !sibYr.analysis.range) return null;
+        return { name: sib.name, recommendedMid: sibYr.analysis.range.mid };
+      })
+      .filter(function (x) { return !!x; });
     return {
       client: { name: c.name, areaCode: c.areaCode },
       shareholder: {
         name: sh.name, taxYear: year,
         education: yr.education, licenses: yr.licenses,
         yearsExperience: yr.yearsExperience, hoursPerWeek: yr.hoursPerWeek,
+        weeksWorkedPerYear: yr.weeksWorkedPerYear, hoursCorroborated: yr.hoursCorroborated,
       },
       roleComponents: yr.roleComponents.filter(function (rc) { return rc.soc; }),
       financials: yr.financials,
       compHistory: sh.compHistory || [],
+      otherShareholders: otherShareholders,
     };
   }
 
   function runAnalysis(c, sh, year) {
+    if (!c.areaCode) { toast('Select the client\'s principal OEWS work area before running an analysis.'); return; }
     var yr = yearRec(sh, year);
     var input = buildEngineInput(c, sh, year);
     if (!input.roleComponents.length) { toast('Add at least one role component with an occupation first.'); return; }
-    try {
-      var result = ENG.analyze(input, DATA, CFG);
-      result.generatedAt = new Date().toISOString();
-      result.inputSnapshot = JSON.parse(JSON.stringify(input)); // methodology snapshot: inputs frozen with the result
-      result.inputFingerprint = INTEGRITY.fingerprint(result.inputSnapshot);
-      result.analysisFingerprint = INTEGRITY.fingerprint({
-        methodology: 'RCT-2.0',
-        generatedAt: result.generatedAt,
-        oewsRelease: result.oewsRelease,
-        inputSnapshot: result.inputSnapshot,
-        costApproach: result.costApproach,
-        marketApproach: result.marketApproach,
-        incomeApproach: result.incomeApproach,
-        range: result.range,
-        reconciliation: result.reconciliation,
-        flags: result.flags,
-      });
-      yr.analysis = result;
-      // prune flag responses for flags that no longer exist
-      var ids = result.flags.map(function (f) { return f.id; });
-      Object.keys(yr.flagResponses || {}).forEach(function (k) { if (ids.indexOf(k) === -1) delete yr.flagResponses[k]; });
-      save(); render();
-      toast('Analysis complete — ' + fmt.usd(result.range.mid) + ' mid recommendation');
-    } catch (e) {
-      toast('Analysis failed: ' + e.message);
-    }
+    // The client's work area may live in a per-state wage file not yet loaded
+    // (see js/data/loader.js) -- ensure it before running the analysis.
+    LOADER.ensure(c.areaCode, function (err) {
+      if (err) { toast(err.message); return; }
+      try {
+        var result = ENG.analyze(input, DATA, CFG);
+        result.generatedAt = new Date().toISOString();
+        result.inputSnapshot = JSON.parse(JSON.stringify(input)); // methodology snapshot: inputs frozen with the result
+        result.inputFingerprint = INTEGRITY.fingerprint(result.inputSnapshot);
+        result.analysisFingerprint = INTEGRITY.fingerprint({
+          methodology: 'RCT-2.1',
+          generatedAt: result.generatedAt,
+          oewsRelease: result.oewsRelease,
+          inputSnapshot: result.inputSnapshot,
+          costApproach: result.costApproach,
+          marketApproach: result.marketApproach,
+          incomeApproach: result.incomeApproach,
+          range: result.range,
+          reconciliation: result.reconciliation,
+          flags: result.flags,
+        });
+        yr.analysis = result;
+        // prune flag responses for flags that no longer exist
+        var ids = result.flags.map(function (f) { return f.id; });
+        Object.keys(yr.flagResponses || {}).forEach(function (k) { if (ids.indexOf(k) === -1) delete yr.flagResponses[k]; });
+        save(); render();
+        toast('Analysis complete — ' + fmt.usd(result.range.mid) + ' mid recommendation');
+      } catch (e) {
+        toast('Analysis failed: ' + e.message);
+      }
+    });
   }
 
   function renderAnalysis(c, sh, year, a) {
     var yr = yearRec(sh, year);
     var wrap = el('div', {});
-    wrap.appendChild(el('h2', {}, ['Analysis — reconciled range', el('span', { class: 'muted', style: 'font-weight:400;font-size:13px' }, ['  OEWS ' + a.oewsRelease + ' · run ' + new Date(a.generatedAt).toLocaleString()])]));
+    var trendSuffix = (a.trending && a.trending.factor !== 1)
+      ? ' · trended ×' + a.trending.factor.toFixed(4) + ' to TY ' + a.trending.targetQuarter.slice(0, 4) + (a.trending.extrapolated ? ' (extrapolated)' : '')
+      : '';
+    wrap.appendChild(el('h2', {}, ['Analysis — reconciled range', el('span', { class: 'muted', style: 'font-weight:400;font-size:13px' }, ['  OEWS ' + a.oewsRelease + trendSuffix + ' · run ' + new Date(a.generatedAt).toLocaleString()])]));
 
     var banner = el('div', { class: 'range-banner' });
     [['low', 'Low'], ['mid', 'Recommended'], ['high', 'High']].forEach(function (b) {
@@ -586,6 +699,18 @@
       ]));
     });
     wrap.appendChild(banner);
+
+    // Planned wages vs. this range (5.5) — the same headline comparison the
+    // memo leads with, so the app view never makes the reader infer the gap.
+    var pwRaw = (yr.financials || {}).totalOfficerWages;
+    var pwNum = (pwRaw !== null && pwRaw !== undefined && pwRaw !== '' && isFinite(Number(pwRaw))) ? Number(pwRaw) : null;
+    if (pwNum !== null) {
+      var pwText, pwCls;
+      if (pwNum < a.range.low) { pwText = 'Planned wages ' + fmt.usd(pwNum) + ' are ' + fmt.usd(a.range.low - pwNum) + ' below this range (see BELOW_RANGE flag).'; pwCls = 'high'; }
+      else if (pwNum > a.range.high) { pwText = 'Planned wages ' + fmt.usd(pwNum) + ' are ' + fmt.usd(pwNum - a.range.high) + ' above this range (see ABOVE_RANGE note).'; pwCls = 'low'; }
+      else { pwText = 'Planned wages ' + fmt.usd(pwNum) + ' fall within this range — no adjustment indicated.'; pwCls = 'ok'; }
+      wrap.appendChild(el('p', {}, [el('span', { class: 'pill ' + pwCls }, [pwText])]));
+    }
 
     // flags first — never buried
     if (a.flags.length) {
@@ -611,7 +736,7 @@
     a.costApproach.components.forEach(function (cc) {
       t.appendChild(el('tr', {}, [
         el('td', {}, [cc.roleTitle || occTitle(cc.soc)]),
-        el('td', {}, [cc.socDisplay + ' ' + occTitle(cc.soc)]),
+        el('td', {}, [cc.socDisplay + ' ' + occTitle(cc.soc) + (cc.broadGroup ? ' (group)' : '')]),
         el('td', {}, [cc.missing ? 'NO DATA' : cc.areaUsedName + (cc.fellBack ? ' (fallback)' : '')]),
         el('td', {}, [cc.percentile + 'th — ' + cc.percentileReason]),
         el('td', { class: 'num' }, [cc.pctTime + '%']),
@@ -645,9 +770,15 @@
     var inc = el('div', { class: 'card' });
     inc.appendChild(el('h3', { style: 'margin-top:0' }, ['3 · Income approach (independent investor)']));
     if (a.incomeApproach.applicable) {
-      inc.appendChild(el('p', {}, ['At the proposed salary of ' + fmt.usd(a.incomeApproach.proposedSalary) + ' plus estimated employer payroll cost of ' + fmt.usd(a.incomeApproach.employerPayrollTax) + ', residual return: ', el('strong', {}, [fmt.usd(a.incomeApproach.residual)]), a.incomeApproach.residualShare != null ? ' (' + fmt.pct(a.incomeApproach.residualShare) + ' of pre-comp earnings)' : '']));
-      inc.appendChild(el('p', { class: 'muted' }, [a.incomeApproach.narrative]));
-      inc.appendChild(el('p', { class: 'muted', style: 'font-size:12px' }, [a.incomeApproach.payrollTaxNote]));
+      var ia = a.incomeApproach;
+      inc.appendChild(el('p', {}, ['Tested at ' + fmt.usd(ia.proposedSalary) + ' (' + ia.salaryBasis + ') plus estimated employer payroll cost of ' + fmt.usd(ia.employerPayrollTax) + ', residual return: ', el('strong', {}, [fmt.usd(ia.residual)]), ia.residualShare != null ? ' (' + fmt.pct(ia.residualShare) + ' of pre-comp earnings)' : '']));
+      if (ia.method === 'return on equity') {
+        inc.appendChild(el('p', { class: 'muted' }, ['Method: return on beginning shareholder equity (' + fmt.usd(ia.equity) + ') — ' + fmt.pct(ia.roe) + ' return, vs. a ' + Math.round(CFG.investorReturn.required * 100) + '% benchmark.']));
+      } else {
+        inc.appendChild(el('p', { class: 'muted' }, ['Method: residual-share screen (beginning shareholder equity not provided — a weaker form of this test).']));
+      }
+      inc.appendChild(el('p', { class: 'muted' }, [ia.narrative]));
+      inc.appendChild(el('p', { class: 'muted', style: 'font-size:12px' }, [ia.payrollTaxNote]));
     } else {
       inc.appendChild(el('p', { class: 'muted' }, [a.incomeApproach.reason || 'Not performed.']));
     }
@@ -665,9 +796,9 @@
 
   function buildMemoModel(c, sh, year) {
     var yr = yearRec(sh, year);
-    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, INTEGRITY.fingerprint(buildEngineInput(c, sh, year)));
+    var readiness = READINESS.evaluate(yr, yr.analysis, DATA, CFG, INTEGRITY.fingerprint(buildEngineInput(c, sh, year)), c);
     var workpaperRecord = {
-      methodology: 'RCT-2.0',
+      methodology: 'RCT-2.1',
       client: c,
       shareholder: { id: sh.id, name: sh.name, compHistory: sh.compHistory || [] },
       taxYear: year,
@@ -702,7 +833,7 @@
   function exportClient(c) {
     c.lastExportedAt = new Date().toISOString();
     save();
-    var payload = { format: 'rct-client', version: 2, exported: c.lastExportedAt, methodology: 'RCT-2.0', oewsRelease: DATA.release, client: c };
+    var payload = { format: 'rct-client', version: 3, exported: c.lastExportedAt, methodology: 'RCT-2.1', oewsRelease: DATA.release, client: c };
     payload.exportFingerprint = INTEGRITY.fingerprint(payload);
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     var a = document.createElement('a');
@@ -726,6 +857,8 @@
             var verify = {};
             Object.keys(obj).forEach(function (key) { if (key !== 'exportFingerprint') verify[key] = obj[key]; });
             if (INTEGRITY.fingerprint(verify) !== claimed) throw new Error('fingerprint mismatch - the exported record changed after it was created');
+          } else {
+            if (!confirm('This file has NO integrity fingerprint — it either predates fingerprinting or the fingerprint was removed. Its contents cannot be verified. Import anyway?')) return;
           }
           var cl = obj.client || obj;
           if (!cl || !cl.name) throw new Error('not a client file');
@@ -745,6 +878,14 @@
   }
 
   // ------------------------------------------------------------------ boot
+
+  // National industry-sector wage comparables (4.3) and ECI wage trending
+  // (4.4) are optional, separately-generated data files -- both are only
+  // produced by a full network refresh (node scripts/refresh-oews.js), so
+  // either may not exist yet. Both are treated as fully optional everywhere
+  // they're consulted.
+  DATA.industry = window.RCT_INDUSTRY || null;
+  DATA.eci = window.RCT_ECI || null;
 
   document.getElementById('vintage').textContent = 'BLS OEWS ' + DATA.release + ' release';
   render();

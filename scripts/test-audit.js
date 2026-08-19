@@ -33,30 +33,50 @@ function goodYear() {
 
 const data = { release: 'May 2025' };
 const cleanAnalysis = { oewsRelease: 'May 2025', flags: [], inputFingerprint: 'current-input' };
+const client = { areaCode: '0017660' };
 console.log('Readiness: finalization gate');
-let result = readiness.evaluate(goodYear(), cleanAnalysis, data, cfg, 'current-input');
+let result = readiness.evaluate(goodYear(), cleanAnalysis, data, cfg, 'current-input', client);
 check('complete record is finalizable', result.finalizable === true);
 check('complete record scores 100', result.score === 100);
 
 let badRevenue = goodYear();
 badRevenue.revenueSources.capitalEquipmentPct = 0;
-result = readiness.evaluate(badRevenue, cleanAnalysis, data, cfg, 'current-input');
+result = readiness.evaluate(badRevenue, cleanAnalysis, data, cfg, 'current-input', client);
 check('90% source allocation blocks finalization', result.finalizable === false && result.blockers.some(x => x.id === 'revenue'));
 
 let unexplainedOverride = goodYear();
 unexplainedOverride.roleComponents[0].percentileOverride = 90;
-result = readiness.evaluate(unexplainedOverride, cleanAnalysis, data, cfg, 'current-input');
+result = readiness.evaluate(unexplainedOverride, cleanAnalysis, data, cfg, 'current-input', client);
 check('unexplained percentile override blocks finalization', result.blockers.some(x => x.id === 'overrides'));
 
 let highFlag = goodYear();
 const flaggedAnalysis = { oewsRelease: 'May 2025', flags: [{ id: 'ZERO', severity: 'high' }], inputFingerprint: 'current-input' };
-result = readiness.evaluate(highFlag, flaggedAnalysis, data, cfg, 'current-input');
+result = readiness.evaluate(highFlag, flaggedAnalysis, data, cfg, 'current-input', client);
 check('unanswered high flag blocks finalization', result.blockers.some(x => x.id === 'flags'));
 highFlag.flagResponses.ZERO = 'Resolved with a documented payroll true-up before year end.';
-result = readiness.evaluate(highFlag, flaggedAnalysis, data, cfg, 'current-input');
+result = readiness.evaluate(highFlag, flaggedAnalysis, data, cfg, 'current-input', client);
 check('documented flag response clears the blocker', !result.blockers.some(x => x.id === 'flags'));
-result = readiness.evaluate(goodYear(), cleanAnalysis, data, cfg, 'changed-input');
+result = readiness.evaluate(goodYear(), cleanAnalysis, data, cfg, 'changed-input', client);
 check('changed calculation inputs invalidate the analysis', result.blockers.some(x => x.id === 'analysis'));
+
+console.log('Readiness: 1.10 additions -- area gate and hours-corroboration gate on profile');
+let noArea = readiness.evaluate(goodYear(), cleanAnalysis, data, cfg, 'current-input', { areaCode: '' });
+check('missing principal work area blocks finalization', noArea.blockers.some(x => x.id === 'area'));
+check('missing principal work area is NOT finalizable', noArea.finalizable === false);
+let withArea = readiness.evaluate(goodYear(), cleanAnalysis, data, cfg, 'current-input', client);
+check('area present clears the area blocker', !withArea.blockers.some(x => x.id === 'area'));
+let noClient = readiness.evaluate(goodYear(), cleanAnalysis, data, cfg, 'current-input');
+check('client omitted entirely also blocks on area (falsy client)', noClient.blockers.some(x => x.id === 'area'));
+
+let uncorroboratedHours = goodYear();
+uncorroboratedHours.hoursPerWeek = 50;
+result = readiness.evaluate(uncorroboratedHours, cleanAnalysis, data, cfg, 'current-input', client);
+check('50 claimed hours without hoursCorroborated blocks the profile item', result.blockers.some(x => x.id === 'profile'));
+let corroboratedHours = goodYear();
+corroboratedHours.hoursPerWeek = 50;
+corroboratedHours.hoursCorroborated = true;
+result = readiness.evaluate(corroboratedHours, cleanAnalysis, data, cfg, 'current-input', client);
+check('50 claimed hours WITH hoursCorroborated clears the profile item', !result.blockers.some(x => x.id === 'profile'));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;

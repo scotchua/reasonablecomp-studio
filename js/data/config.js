@@ -12,18 +12,24 @@
   return {
 
     // ---- Experience → wage percentile tiers (Cost / Multiple Components approach) ----
-    // Default percentile for each role component, from the shareholder's profile.
-    // Any component can be overridden with a documented reason; the override and
-    // reason are reproduced verbatim in the memo. The 90th percentile is never a
-    // default — it is available only as a per-component override (senior
-    // owner-operator with management scope for that component).
+    // Default percentile for each role component, from the shareholder's profile
+    // (experience only — licensure is a PER-COMPONENT floor applied separately,
+    // see licenseApplies below, not part of this shared default). Any component
+    // can be overridden with a documented reason; the override and reason are
+    // reproduced verbatim in the memo. The 90th percentile is never a default —
+    // it is available only as a per-component override (senior owner-operator
+    // with management scope for that component).
     percentiles: [10, 25, 50, 75, 90],
     experienceTiers: [
       { maxYears: 3,        percentile: 25, label: 'Less than 3 years relevant experience' },
       { maxYears: 8,        percentile: 50, label: '3–8 years relevant experience' },
-      { maxYears: Infinity, percentile: 75, label: 'More than 8 years relevant experience, or licensed specialist' },
+      { maxYears: Infinity, percentile: 75, label: 'More than 8 years relevant experience' },
     ],
-    licensedMinimumPercentile: 75, // holding a professional license floors the default tier here
+    // Holding a professional license/credential floors a role component at this
+    // percentile — but ONLY the component(s) marked licenseApplies:true, never
+    // every "hat" a shareholder wears (a driver's license has no bearing on a
+    // bookkeeping component performed by the same person).
+    licensedMinimumPercentile: 75,
 
     // ---- Market approach ----
     // A single SOC code "plainly dominates" the role at or above this share of time;
@@ -38,14 +44,43 @@
     maxHoursScale: 60,
 
     // ---- Income approach (independent investor test) ----
-    // Employer payroll cost on the proposed salary. SIMPLIFICATION: flat 7.65%
-    // (employer OASDI + Medicare) with no Social Security wage-base ceiling and no
-    // FUTA/SUTA — slightly overstates employer cost at high salaries, which is the
-    // conservative direction for this test. Stated in the memo where used.
-    employerPayrollTaxRate: 0.0765,
+    // Exact employer payroll cost on the proposed salary: 6.2% OASDI up to the
+    // Social Security wage base for the tax year, 1.45% Medicare (uncapped — the
+    // employer side has no Additional Medicare Tax), and 0.6% net FUTA (6.0%
+    // gross less the standard 5.4% full state credit) on the first $7,000.
+    // State unemployment tax and workers' compensation premiums are excluded and
+    // disclosed in the memo (they vary by state/rating and would need per-client
+    // input) — this understates employer cost slightly.
+    payrollTax: {
+      oasdiRate: 0.062,
+      medicareRate: 0.0145,
+      futaNetRate: 0.006,
+      futaWageBase: 7000,
+      // SSA OASDI wage bases by year (2026 announced by SSA in October 2025).
+      // A tax year outside this table clamps to the nearest year on file.
+      socialSecurityWageBase: {
+        2015: 118500, 2016: 118500, 2017: 127200, 2018: 128400, 2019: 132900,
+        2020: 137700, 2021: 142800, 2022: 147000, 2023: 160200, 2024: 168600,
+        2025: 176100, 2026: 184500,
+      },
+    },
     // Residual return below this share of net income before officer comp raises
-    // the "thin residual" plausibility flag (not a veto of the market/cost figures).
+    // the "thin residual" plausibility flag -- used ONLY as the weaker residual-
+    // share screen when beginning shareholder equity was not provided (Phase 3).
     thinResidualShare: 0.10,
+    // Return on beginning shareholder equity, the true independent-investor test:
+    // below `required` is a "thin" plausibility flag (not a veto). 10% is a
+    // defensible floor of what a passive investor demands over the long run;
+    // `strong` is a reference point for a comfortably-above-required return, not
+    // itself a distinct verdict tier.
+    investorReturn: { required: 0.10, strong: 0.20 },
+
+    // ---- ECI wage trending (4.4) ----
+    // Trends OEWS wages from their May survey reference date to the tax
+    // year's mid-year using the BLS Employment Cost Index. Disabling this
+    // reverts to a flat factor of 1 (no trending) and surfaces a staleness
+    // note whenever the tax year and OEWS vintage genuinely differ.
+    wageTrending: { enabled: true },
 
     // ---- Red-flag thresholds ----
     flags: {
@@ -63,6 +98,12 @@
       // "Zero or near-zero salary with more than de minimis services."
       nearZeroSalary: 10000,
       deMinimisHoursPerWeek: 10,
+      // Planned wages vs. the computed reasonable-compensation range: shortfalls
+      // deeper than this share of the range's low end are flagged high (else medium).
+      belowRangeHighShortfall: 0.20,
+      // Planned wages above this multiple of the range's high end are flagged low
+      // (overpaying employment tax, not an S-corp reclassification risk).
+      aboveRangeRatio: 1.25,
     },
 
     // ---- Annual refresh staleness (dashboard) ----
@@ -78,11 +119,12 @@
       'compensationResolution',
     ],
     auditReadinessWeights: {
-      profile: 12,
+      area: 6,
+      profile: 10,
       roles: 18,
       overrides: 8,
       revenue: 16,
-      analysis: 18,
+      analysis: 16,
       flags: 12,
       approval: 10,
       evidence: 6,
@@ -144,6 +186,16 @@
         use: 'Survey methodology, reliability, scope, and release documentation.',
       },
     ],
+
+    // ---- OEWS data limitations (5.2) — rendered verbatim in every memo ----
+    oewsLimitations:
+      'OEWS wage estimates measure the straight-time wages of employees of sampled establishments. They include base ' +
+      'pay, commissions, production bonuses, and tips, but exclude overtime premiums, nonproduction bonuses (such as ' +
+      'year-end or profit-sharing bonuses), equity compensation, and the employer cost of benefits. They reflect ' +
+      'employees rather than owner-operators, and cross-industry estimates average establishments of all industries ' +
+      'and sizes. These limitations tend to make OEWS a conservative (low) measure of the total market compensation ' +
+      'of an experienced owner-manager; where a component uses a cross-industry figure, the industry-sector ' +
+      'comparable shown, if any, provides corroboration.',
 
     disclaimer:
       'This analysis applies IRS-published reasonable compensation methodology (Reasonable Compensation ' +
